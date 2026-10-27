@@ -2,6 +2,32 @@
 // tokens and layout; this file only adds what a wall display needs: one
 // dominant verdict, numbers that do not jitter, and a phone layout.
 
+// Gentelella keeps the sidebar dark in both themes on purpose — its
+// --sidebar-* tokens are declared once in :root and never redefined under
+// [data-theme="dark"]. That reads as a half-lit page here, where light mode
+// exists so the whole dashboard can be light, so the tokens are re-pointed at
+// the surface colours and the sidebar follows the theme like everything else.
+:root[data-theme="light"] {
+  --sidebar-bg: var(--bg-surface);
+  --sidebar-hover: rgba(4, 32, 69, 0.04);
+  --sidebar-active: rgba(26, 187, 156, 0.10);
+  --sidebar-text: var(--text-secondary);
+  --sidebar-text-hover: var(--text);
+  --sidebar-text-active: var(--text);
+  --sidebar-border: var(--border-translucent);
+}
+// On white-on-near-white the sidebar needs an edge the dark one never did.
+:root[data-theme="light"] .sidebar { border-inline-end: 1px solid var(--border-color); }
+// These are hardcoded white-on-dark in the template rather than tokenised,
+// so re-pointing --sidebar-* alone leaves them invisible on a light sidebar.
+:root[data-theme="light"] {
+  .brand-name,
+  .sidebar-user-info .name { color: var(--text); }
+  .nav-label { color: var(--text-muted); }
+  .sidebar-nav::-webkit-scrollbar-thumb { background: rgba(4, 32, 69, 0.14); }
+  .sidebar-user .avatar .online { border-color: var(--bg-surface); }
+}
+
 // Every number uses tabular figures so digits keep their column as they tick.
 body { font-variant-numeric: tabular-nums; }
 .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
