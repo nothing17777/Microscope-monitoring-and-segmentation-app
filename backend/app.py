@@ -178,7 +178,12 @@ def create_app(cfg: Config) -> FastAPI:
 
         @app.get("/")
         def index():
-            return FileResponse(FRONTEND_DIST / "index.html")
+            # The asset filenames are content-hashed and may be cached
+            # forever, but index.html is what points at them: if a browser
+            # caches it, a tab left open over a redeploy keeps running the
+            # previous bundle against the new API.
+            return FileResponse(FRONTEND_DIST / "index.html",
+                                headers={"Cache-Control": "no-store"})
     else:
         @app.get("/")
         def no_frontend():

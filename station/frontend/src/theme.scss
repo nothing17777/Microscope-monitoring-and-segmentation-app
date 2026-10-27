@@ -1,0 +1,8 @@
+// Gentelella v4 supplies the design system. Relative paths, not a bare
+// package specifier: its `exports` map does not expose the SCSS sources.
+@use "../node_modules/gentelella/src/scss/v4/tokens";
+@use "../node_modules/gentelella/src/scss/v4/layout";
+@use "../node_modules/gentelella/src/scss/v4/components";
+@use "../node_modules/gentelella/src/scss/v4/forms";
+
+@use "station";

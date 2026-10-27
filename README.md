@@ -97,6 +97,28 @@ python -c "from dinov3.hub.backbones import dinov3_vitl16; print('dinov3 ok')"
 The cpdino weights themselves are a ~1.1 GB download on first use, cached in
 `~/.cellpose`. Pull them once before the acquisition run, not during it.
 
+## Station — the run-centric app
+
+`station/` is a **separate app** for monitoring and controlling the microscope
+and the segmentation from anywhere, including off campus, for unattended
+overnight runs. Where this dashboard is organised around files, Station is
+organised around **runs**: a run is a plate, and every image and mask belongs
+to one. It adds a 96-well plate map, run history with chart replay, and
+webhook alerts.
+
+Different port (8100), different database, different frontend. This dashboard
+is untouched. See `station/README.md`.
+
+```bash
+python -m station.main --input-dir /data/lumaviewpro/output --db-path ./data/station.sqlite
+```
+
+> Do not point both apps at the same `--input-dir` at once: each runs its own
+> segmenter and they would both segment the same TIFFs.
+
+Station's worker subclasses this one, so the partial-file guard and backlog
+accounting are inherited rather than copied and cannot drift.
+
 ## The two queues
 
 Two kinds of work, tracked separately, both in the `jobs` table.

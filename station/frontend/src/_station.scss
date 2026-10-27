@@ -1,0 +1,196 @@
+// Station-specific styling on top of Gentelella's tokens. Two panels carry
+// equal weight here — acquisition and segmentation — so neither gets the
+// single dominant treatment the file-centric dashboard gives the backlog.
+
+body { font-variant-numeric: tabular-nums; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--text-muted); }
+.stack { display: flex; flex-direction: column; gap: var(--space-4); }
+
+// Colour means state and nothing else; every state is also named in words,
+// so the page survives being read in grayscale.
+.state-ok    { --state: var(--primary);     --state-lt: var(--primary-lt); }
+.state-warn  { --state: var(--yellow);      --state-lt: var(--yellow-lt); }
+.state-bad   { --state: var(--red);         --state-lt: var(--red-lt); }
+.state-idle  { --state: var(--text-muted);  --state-lt: var(--bg-surface-secondary); }
+.state-busy  { --state: var(--azure);       --state-lt: var(--azure-lt); }
+
+// --- panels -----------------------------------------------------------------
+.panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-inline-start: 4px solid var(--state);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  display: flex; flex-direction: column; gap: var(--space-4);
+  min-width: 0;
+}
+.panel-kicker {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-muted); font-weight: var(--font-weight-medium);
+}
+.panel-headline {
+  font-size: clamp(24px, 3.2vw, 40px);
+  font-weight: var(--font-weight-bold); line-height: 1.1;
+  letter-spacing: -0.01em; color: var(--state);
+}
+.panel-sub { color: var(--text-secondary); max-width: 60ch; }
+
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: var(--space-4); }
+.figure-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted); margin-bottom: 2px;
+}
+.figure-value {
+  font-family: var(--font-mono);
+  font-size: clamp(24px, 3vw, 34px);
+  font-weight: var(--font-weight-bold); line-height: 1.1;
+  transition: color 200ms ease;
+}
+.figure-value .unit { font-size: 0.42em; color: var(--text-muted); margin-inline-start: 4px; font-family: var(--font); }
+// A duration range ("5m 44s – 9m 34s") is four times as wide as a count and
+// would otherwise wrap onto four lines in a figure column.
+.figure-value.is-range { font-size: clamp(15px, 1.5vw, 20px); line-height: 1.3; }
+.figure-sub { font-size: 12px; color: var(--text-secondary); min-height: 1.1em; }
+.figure-big .figure-value { font-size: clamp(36px, 5vw, 60px); color: var(--state); }
+
+// One pass on entering a worse state, then still. Nothing here loops.
+@keyframes state-enter { from { background: var(--state-lt); } to { background: var(--bg-surface); } }
+.panel.just-changed { animation: state-enter 1200ms ease-out 1; }
+@media (prefers-reduced-motion: reduce) {
+  .panel.just-changed { animation: none; }
+  .figure-value { transition: none; }
+}
+
+// --- plate map --------------------------------------------------------------
+.plate { display: flex; flex-direction: column; gap: var(--space-2); overflow-x: auto; }
+.plate-grid {
+  display: grid;
+  grid-template-columns: 1.4rem repeat(var(--cols, 12), minmax(0, 1fr));
+  gap: 3px; min-width: 20rem;
+}
+.plate-corner, .plate-head, .plate-row-label {
+  font-size: 10px; color: var(--text-muted); font-family: var(--font-mono);
+  display: flex; align-items: center; justify-content: center;
+}
+.well {
+  aspect-ratio: 1; border-radius: 50%;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface-secondary);
+  position: relative;
+}
+// Each state is a different fill AND a different border weight, so the map
+// is still readable without colour.
+.well-acquired  { background: var(--azure-lt);   border-color: var(--azure); }
+.well-segmenting{ background: var(--yellow-lt);  border-color: var(--yellow); border-style: dashed; }
+.well-done      { background: var(--primary);    border-color: var(--primary); }
+.well-failed    { background: var(--red-lt);     border-color: var(--red); border-width: 2px; }
+.plate-legend { display: flex; gap: var(--space-4); flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); }
+.plate-legend .key { display: inline-flex; align-items: center; gap: 6px; }
+.plate-legend .swatch { width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--border-color); }
+
+// --- queue ------------------------------------------------------------------
+.queue-lane { display: flex; flex-direction: column; }
+.queue-empty {
+  padding: var(--space-5) var(--space-4); color: var(--text-muted); text-align: center;
+  border: 1px dashed var(--border-color); border-radius: var(--radius); margin: var(--space-4);
+}
+.queue-empty strong { display: block; color: var(--text-secondary); margin-bottom: 4px; }
+.job {
+  display: grid; grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  gap: var(--space-3); align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-color-light);
+}
+.job:first-child { border-top: 0; }
+.job-running { background: var(--bg-surface-secondary); }
+.job-pos { font-family: var(--font-mono); color: var(--text-muted); font-size: 13px; text-align: center; }
+.job-running .job-pos { color: var(--state); }
+.job-main { min-width: 0; }
+.job-title { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.job-name { font-weight: var(--font-weight-medium); }
+.job-running .job-name { font-weight: var(--font-weight-bold); }
+.job-meta { display: flex; gap: var(--space-3); flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.job-bar { height: 4px; border-radius: 2px; background: var(--border-color); margin-top: var(--space-2); overflow: hidden; }
+.job-bar span { display: block; height: 100%; background: var(--state); transition: width 200ms ease; }
+.job-actions { display: flex; gap: 4px; opacity: 0.25; transition: opacity 150ms ease; }
+.job:hover .job-actions, .job:focus-within .job-actions { opacity: 1; }
+@media (hover: none) { .job-actions { opacity: 1; } }
+.job-actions .btn { padding: 4px 8px; font-size: 12px; }
+
+.status-chip {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 1px 6px; border-radius: var(--radius-sm);
+  background: var(--state-lt); color: var(--state); border: 1px solid var(--state);
+}
+
+// --- notices ----------------------------------------------------------------
+.notice {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-color); border-inline-start: 3px solid var(--state);
+  border-radius: var(--radius); background: var(--bg-surface); color: var(--text-secondary);
+}
+.notice strong { color: var(--text); font-weight: var(--font-weight-medium); }
+
+// --- charts, tables, forms --------------------------------------------------
+.chart-box { height: 240px; }
+.chart-box-hero { height: 300px; }
+.chart-note { font-size: 12px; color: var(--text-muted); }
+
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.data th {
+  text-align: start; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted); font-weight: var(--font-weight-medium);
+  padding: 6px 8px; border-bottom: 1px solid var(--border-color);
+}
+table.data td { padding: 7px 8px; border-bottom: 1px solid var(--border-color-light); vertical-align: top; }
+table.data tr:last-child td { border-bottom: 0; }
+table.data a { cursor: pointer; }
+td.err { font-family: var(--font-mono); font-size: 12px; word-break: break-word; color: var(--text-secondary); }
+
+.inline-form { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; }
+.inline-form .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.inline-form label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+.inline-form input {
+  background: var(--bg-surface-secondary); color: var(--text);
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+  padding: 6px 8px; font: inherit; min-width: 0;
+}
+.form-error { color: var(--red); font-size: 12px; }
+
+.theme-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.theme-toggle svg { width: 15px; height: 15px; flex: none; }
+
+// Gentelella keeps the sidebar dark in both themes; here light mode means the
+// whole page is light. The --sidebar-* tokens live only in :root, and
+// .brand-name / .sidebar-user-info .name are hardcoded #fff, so both need
+// overriding or they vanish on white.
+:root[data-theme="light"] {
+  --sidebar-bg: var(--bg-surface);
+  --sidebar-hover: rgba(4, 32, 69, 0.04);
+  --sidebar-active: rgba(26, 187, 156, 0.10);
+  --sidebar-text: var(--text-secondary);
+  --sidebar-text-hover: var(--text);
+  --sidebar-text-active: var(--text);
+  --sidebar-border: var(--border-translucent);
+
+  .sidebar { border-inline-end: 1px solid var(--border-color); }
+  .brand-name, .sidebar-user-info .name { color: var(--text); }
+  .nav-label { color: var(--text-muted); }
+  .sidebar-nav::-webkit-scrollbar-thumb { background: rgba(4, 32, 69, 0.14); }
+}
+
+// --- phone ------------------------------------------------------------------
+// The overnight check from a phone: state, acquisition progress, backlog and
+// ETA stack and stay readable without zooming.
+@media (max-width: 600px) {
+  .panel { padding: var(--space-4); }
+  .chart-box, .chart-box-hero { height: 120px; }  // sparklines
+  .job { grid-template-columns: 1.75rem minmax(0, 1fr); }
+  .job-actions { grid-column: 2; justify-content: flex-start; margin-top: var(--space-2); }
+  .inline-form .field { flex: 1 1 100%; }
+  .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .plate-grid { min-width: 17rem; }
+  table.data { font-size: 12px; }
+}
