@@ -1,0 +1,37 @@
+# /etc/systemd/system/microscope-monitor.service
+#
+#   sudo cp deploy/microscope-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now microscope-monitor
+#   journalctl -u microscope-monitor -f
+#
+# Edit User, the paths, and MM_INPUT_DIR to match the workstation.
+[Unit]
+Description=Microscope acquisition monitor + Cellpose segmentation worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lab
+Group=lab
+WorkingDirectory=/opt/microscope-monitor
+Environment=MM_INPUT_DIR=/data/lumaviewpro/output
+Environment=MM_OUTPUT_DIR=/data/masks
+Environment=MM_DB_PATH=/var/lib/microscope-monitor/monitor.sqlite
+Environment=MM_SPECS_PATH=/var/lib/microscope-monitor/specs.txt
+Environment=MM_PORT=8000
+Environment=MM_BATCH_SIZE=16
+Environment=MM_MODEL=cpdino
+# Cellpose model cache; keep it on a path the service user owns.
+Environment=CELLPOSE_LOCAL_MODELS_PATH=/var/lib/microscope-monitor/cellpose
+ExecStart=/opt/microscope-monitor/.venv/bin/python -m backend.main
+Restart=always
+RestartSec=5
+# The worker is the point of the machine; don't let the OOM killer prefer it.
+OOMScoreAdjust=-200
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

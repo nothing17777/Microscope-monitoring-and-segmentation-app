@@ -1,0 +1,11 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+psutil>=6.0
+numpy>=1.26
+tifffile>=2024.5.22
+# Install torch separately, matched to the machine:
+#   Ubuntu + RTX 5090 (Blackwell, sm_120) needs a CUDA 12.8+ build:
+#     pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   macOS (MPS): pip install torch
+torch
+cellpose>=4.0
