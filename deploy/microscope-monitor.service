@@ -25,6 +25,8 @@ Environment=MM_BATCH_SIZE=16
 Environment=MM_MODEL=cpdino
 # Cellpose model cache; keep it on a path the service user owns.
 Environment=CELLPOSE_LOCAL_MODELS_PATH=/var/lib/microscope-monitor/cellpose
+# Refuse to start if the GPU stack or the input dir is not ready.
+ExecStartPre=/opt/microscope-monitor/.venv/bin/python preflight.py
 ExecStart=/opt/microscope-monitor/.venv/bin/python -m backend.main
 Restart=always
 RestartSec=5

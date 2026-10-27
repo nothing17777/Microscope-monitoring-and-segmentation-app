@@ -91,6 +91,34 @@ python -c "from dinov3.hub.backbones import dinov3_vitl16; print('dinov3 ok')"
 The cpdino weights themselves are a ~1.1 GB download on first use, cached in
 `~/.cellpose`. Pull them once before the acquisition run, not during it.
 
+## Preflight
+
+`preflight.py` checks the things that actually break on a fresh workstation
+and exits non-zero if any of them would. Run it before a real acquisition,
+not during one.
+
+```bash
+python preflight.py --input-dir /data/lumaviewpro/output --output-dir /data/masks
+```
+
+It checks: Python version; torch import and CUDA build; which device the app
+will pick; **whether the installed torch wheel has kernels for this card**
+(`sm_120` in `torch.cuda.get_arch_list()` — the RTX 5090 trap) plus a real
+512x512 matmul to prove a kernel launches; `nvidia-smi` and its fields;
+the `dinov3` import; cellpose; whether the cpdino weights are already cached;
+the input dir (exists, readable, TIFF count), output dir writability, free
+space, the input volume's filesystem; the port; and whether `frontend/dist`
+was built.
+
+Two optional flags go further, at the cost of a ~1.1 GB download on first use:
+
+```bash
+python preflight.py --input-dir ... --load-model   # actually construct cpdino
+python preflight.py --input-dir ... --segment      # ...and segment one image
+```
+
+Warnings are survivable; any `FAIL` means don't start the run.
+
 ## Local test (Mac mini)
 
 Three terminals.
