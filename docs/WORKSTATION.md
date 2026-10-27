@@ -59,3 +59,23 @@ Per protocol run, flat in one folder:
   take about half the GPU time.
 - **Station vs script:** the station's masks were byte-identical to the
   script's for every image both processed.
+
+## What normal looks like
+
+Also shown live on the station Dashboard ("What normal looks like" card, which
+marks each row **normal** or **check**). Measured on this machine during a
+full-plate run (96 wells, PC + Green, 20 Z) with the standalone script also
+running on the GPU. A different protocol, objective, or another program on the
+GPU changes these numbers.
+
+| What | Normal | Look into it when |
+|---|---|---|
+| GPU load | 80–100% while images are waiting; ~0% when the backlog is empty. It swings 0↔100% inside every batch, so judge the average. | ~0% while images are waiting and nothing is paused: the worker is stuck |
+| GPU temperature | 55–75 °C under load (peak seen 73 °C) | above 83 °C for minutes: check fans and room |
+| GPU power | 400–600 W segmenting (touching the 600 W limit is normal); 80–120 W idle | idle power while images are waiting |
+| GPU memory | ≈5.3 GB per Cellpose process: 5.3 GB with the station alone, ≈10.7 GB with the standalone script too | above 28 of 32 GB, or "CUDA OOM" |
+| CPU | 10–25%; brief ~90% at startup while existing images are read | above 80% for minutes |
+| RAM | ≈20% (12 of 62 GB) | above 80% |
+| Disk writes | 5–50 MB/s during acquisition; reads ≈0 (served from memory) | free space under 50 GB (alert fires) |
+| Time between images | ≈0.6 s mean (PC ~0.47 s, Green ~0.70 s); longer at well moves | mean above 1 s for minutes during a z-stack: acquisition has slowed |
+| Segmentation speed | ≈0.9 img/s sharing the GPU with the script (≈1.1 s per image). The microscope makes ≈1.65 img/s, so "Falling behind" during a plate is expected with these settings, and the backlog drains after acquisition ends. | 0 img/s while images are waiting and nothing is paused |

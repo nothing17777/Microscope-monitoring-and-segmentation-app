@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Chart, { stateColor, toSeries, token } from './Charts'
 import { PhaseBar, PhaseTable } from './Experiment'
+import Reference from './Reference'
 import Plate from './Plate'
 import Queue from './Queue'
 import RunDetail from './RunDetail'
@@ -615,6 +616,8 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              <Reference series={series} snap={snap} />
 
               <PhaseBar phase={phase} batchSize={batchSize} known={knownPhases}
                         onChanged={changed} />
