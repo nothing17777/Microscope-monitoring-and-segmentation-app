@@ -1,105 +1,44 @@
-:root {
-  --bg: #0a0d12;
-  --panel: #141a23;
-  --panel-2: #1b2330;
-  --line: #27303d;
-  --text: #e8eef7;
-  --muted: #8b99ad;
-  --ok: #3ddc84;
-  --warn: #ffb020;
-  --bad: #ff4d4d;
-  --accent: #4cc2ff;
-  --accent-2: #b388ff;
+/* Only what AdminLTE/Bootstrap does not already give us. The dashboard is
+   read from across the room, so a few things are deliberately oversized. */
+
+/* The one number the whole test is about. */
+#backlog-banner .backlog-number {
+  font-size: clamp(56px, 7vw, 104px);
+  font-weight: 700;
+  line-height: 1;
+}
+#backlog-banner .verdict {
+  font-size: clamp(22px, 2.6vw, 38px);
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+#backlog-banner.falling-behind {
+  animation: backlog-pulse 1.6s ease-in-out infinite;
+}
+@keyframes backlog-pulse {
+  50% { box-shadow: 0 0 0 0.6rem rgba(var(--bs-danger-rgb), 0.18); }
 }
 
-* { box-sizing: border-box; }
+/* small-box numbers are sized for a desk; bump them for a room. */
+.small-box .inner h3 { font-size: clamp(30px, 3.2vw, 46px); }
+.small-box .inner p { font-size: 1.05rem; }
 
-html, body, #root { height: 100%; }
+/* Tabular figures everywhere, so live numbers don't jitter. */
+body { font-variant-numeric: tabular-nums; }
 
-body {
+.spec-dump {
+  max-height: 420px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre;
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: ui-sans-serif, system-ui, "Helvetica Neue", Arial, sans-serif;
-  font-variant-numeric: tabular-nums;
 }
 
-.wrap { padding: 20px 28px 48px; max-width: 2200px; margin: 0 auto; }
-
-header.top {
-  display: flex; align-items: baseline; gap: 20px; flex-wrap: wrap;
-  padding-bottom: 14px; border-bottom: 1px solid var(--line); margin-bottom: 20px;
-}
-header.top h1 { font-size: 30px; margin: 0; letter-spacing: 0.5px; }
-.chips { display: flex; gap: 10px; flex-wrap: wrap; margin-left: auto; }
-.chip {
-  background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
-  padding: 6px 14px; font-size: 15px; color: var(--muted);
-}
-.chip b { color: var(--text); font-weight: 600; }
-.chip.live b { color: var(--ok); }
-.chip.dead b { color: var(--bad); }
-
-/* --- the one number the test is about --- */
-.backlog-banner {
-  border-radius: 14px; padding: 22px 26px; margin-bottom: 20px;
-  display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
-  border: 2px solid var(--line); background: var(--panel);
-}
-.backlog-banner.ok { border-color: #1f6b43; background: linear-gradient(90deg,#0f2318,#141a23); }
-.backlog-banner.bad {
-  border-color: var(--bad);
-  background: linear-gradient(90deg, #3a0f12, #1d1116);
-  animation: pulse 1.6s ease-in-out infinite;
-}
-@keyframes pulse { 50% { border-color: #ff9a9a; } }
-.backlog-banner .n { font-size: 84px; font-weight: 700; line-height: 1; }
-.backlog-banner.ok .n { color: var(--ok); }
-.backlog-banner.bad .n { color: var(--bad); }
-.backlog-banner .label { font-size: 15px; letter-spacing: 2px; color: var(--muted); text-transform: uppercase; }
-.backlog-banner .verdict { font-size: 34px; font-weight: 700; letter-spacing: 1px; }
-.backlog-banner.ok .verdict { color: var(--ok); }
-.backlog-banner.bad .verdict { color: var(--bad); }
-.backlog-banner .trend { font-size: 16px; color: var(--muted); margin-top: 6px; }
-
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; }
-.tile {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-  padding: 18px 20px;
-}
-.tile .k { font-size: 14px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--muted); }
-.tile .v { font-size: 46px; font-weight: 700; margin-top: 8px; line-height: 1.05; }
-.tile .sub { font-size: 15px; color: var(--muted); margin-top: 6px; }
-.tile .v small { font-size: 24px; color: var(--muted); font-weight: 600; }
-
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; margin-top: 22px; }
-.card {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
-}
-.card h2 {
-  margin: 0 0 12px; font-size: 17px; letter-spacing: 1.4px;
-  text-transform: uppercase; color: var(--muted); font-weight: 600;
-}
-.card .row { display: flex; align-items: center; gap: 12px; }
-.card .row h2 { margin-bottom: 0; }
-
-button {
-  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
-  border-radius: 8px; padding: 8px 14px; font-size: 15px; cursor: pointer;
-}
-button:hover { border-color: var(--accent); color: var(--accent); }
-
-pre.specs {
-  margin: 0; max-height: 440px; overflow: auto; background: #0b0f15;
-  border: 1px solid var(--line); border-radius: 8px; padding: 14px;
-  font-size: 13px; line-height: 1.45; white-space: pre; color: #c8d6e8;
+.table-failures td.error {
+  font-family: var(--bs-font-monospace);
+  font-size: 13px;
+  word-break: break-word;
 }
 
-table.fail { width: 100%; border-collapse: collapse; font-size: 14px; }
-table.fail th, table.fail td {
-  text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line);
-  vertical-align: top;
-}
-table.fail th { color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; font-size: 12px; }
-table.fail td.err { color: #ff9a9a; font-family: ui-monospace, monospace; font-size: 13px; word-break: break-word; }
-.empty { color: var(--muted); font-size: 15px; padding: 8px 2px; }
+.app-sidebar .brand-text { font-size: 1.05rem; }

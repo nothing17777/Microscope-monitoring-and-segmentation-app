@@ -9,3 +9,7 @@ tifffile>=2024.5.22
 #   macOS (MPS): pip install torch
 torch
 cellpose>=4.0
+# cpdino needs Meta's DINOv3 backbone, which cellpose imports but does NOT
+# declare as a dependency -- without it CellposeModel(pretrained_model='cpdino')
+# raises NameError: dinov3_vitl16 at construction. Install it explicitly:
+#   pip install git+https://github.com/facebookresearch/dinov3

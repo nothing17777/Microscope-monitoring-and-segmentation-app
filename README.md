@@ -10,7 +10,8 @@ can't, the banner at the top turns red and says `SEGMENTATION FALLING BEHIND`.
 
 - Backend: FastAPI + SQLite, single process, two background threads
   (segmenter, telemetry sampler).
-- Frontend: React + Vite + recharts, one dark dashboard page.
+- Frontend: React + Vite + recharts on the AdminLTE 4 admin theme
+  (Bootstrap 5.3, no jQuery), one dark dashboard page.
 - Device: `cuda` if available, else `mps`, else `cpu` — shown in the UI header.
 
 ## How files are picked up
@@ -48,6 +49,7 @@ Cellpose and torch want a Python that has wheels; use 3.11 or 3.12.
 ```bash
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt     # torch here is the MPS build
+pip install git+https://github.com/facebookresearch/dinov3   # required by cpdino
 cd frontend && npm install && npm run build && cd ..
 ```
 
@@ -64,9 +66,30 @@ default PyPI wheel will load and then fail at the first kernel launch.
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install torch --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
+pip install git+https://github.com/facebookresearch/dinov3   # required by cpdino
 cd frontend && npm install && npm run build && cd ..
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
+
+### The cpdino / DINOv3 trap
+
+`cellpose` imports its DINOv3 backbone inside a bare `try/except` that only
+logs a warning (`cellpose/vit.py`), so a missing `dinov3` package looks fine at
+import time and then fails at model construction with:
+
+```
+NameError: name 'dinov3_vitl16' is not defined
+```
+
+`dinov3` is not a declared cellpose dependency and is not on PyPI. Install it
+from git, as above, and verify before a real run:
+
+```bash
+python -c "from dinov3.hub.backbones import dinov3_vitl16; print('dinov3 ok')"
+```
+
+The cpdino weights themselves are a ~1.1 GB download on first use, cached in
+`~/.cellpose`. Pull them once before the acquisition run, not during it.
 
 ## Local test (Mac mini)
 
