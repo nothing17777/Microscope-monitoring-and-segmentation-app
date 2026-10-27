@@ -531,6 +531,47 @@ export default function App() {
                 </div>
               </div>
 
+              {snap?.gpu ? (
+                <div className="row col-3">
+                  <div className="card">
+                    <div className="card-header"><h3 className="card-title">GPU temperature</h3>
+                      <span className="chart-note">now {nf(snap.gpu.gpu_temp_c, 0)} °C</span></div>
+                    <div className="card-body">
+                      <Chart data={series} yLabel="°C" lines={[
+                        { key: 'gpuTemp', name: '°C', color: token('--red', '#e74c3c') },
+                      ]} />
+                    </div>
+                  </div>
+                  <div className="card">
+                    <div className="card-header"><h3 className="card-title">GPU power</h3>
+                      <span className="chart-note">
+                        now {nf(snap.gpu.gpu_power_w, 0)} W
+                        {snap.gpu.gpu_power_limit_w ? ` of ${nf(snap.gpu.gpu_power_limit_w, 0)} W limit` : ''}
+                      </span></div>
+                    <div className="card-body">
+                      <Chart data={series} yLabel="W" lines={[
+                        { key: 'gpuPower', name: 'W', color: token('--yellow', '#f0ad4e') },
+                        { key: 'gpuPowerLimit', name: 'limit W',
+                          color: token('--text-muted', '#8a93a3') },
+                      ]} />
+                    </div>
+                  </div>
+                  <div className="card">
+                    <div className="card-header"><h3 className="card-title">GPU memory</h3>
+                      <span className="chart-note">
+                        now {nf(snap.gpu.vram_used_mb / 1024, 1)} of {nf(snap.gpu.vram_total_mb / 1024, 0)} GB
+                      </span></div>
+                    <div className="card-body">
+                      <Chart data={series} yLabel="GB" allowDecimals lines={[
+                        { key: 'vramUsed', name: 'used GB', color: token('--azure', '#4299e1') },
+                        { key: 'vramTotal', name: 'total GB',
+                          color: token('--text-muted', '#8a93a3') },
+                      ]} />
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="row col-2">
                 <div className="card">
                   <div className="card-header">

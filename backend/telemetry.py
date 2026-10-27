@@ -22,7 +22,7 @@ TREND_WINDOW_S = 300.0     # 5 minutes, for the falling-behind test
 
 GPU_QUERY = (
     "utilization.gpu,memory.used,memory.total,temperature.gpu,"
-    "power.draw,utilization.memory"
+    "power.draw,utilization.memory,power.limit"
 )
 
 
@@ -48,7 +48,7 @@ def sample_gpu() -> dict[str, Any] | None:
             return None
 
     f = [num(v) for v in line.split(",")]
-    f += [None] * (6 - len(f))
+    f += [None] * (7 - len(f))
     return {
         "gpu_util_pct": f[0],
         "vram_used_mb": f[1],
@@ -56,6 +56,7 @@ def sample_gpu() -> dict[str, Any] | None:
         "gpu_temp_c": f[3],
         "gpu_power_w": f[4],
         "vram_util_pct": f[5],
+        "gpu_power_limit_w": f[6],
     }
 
 
