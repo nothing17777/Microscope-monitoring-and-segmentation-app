@@ -272,6 +272,21 @@ python preflight.py --input-dir ... --segment      # ...and segment one image
 python preflight.py --input-dir ... --throughput   # ...and time a full-size batch
 ```
 
+A fourth flag checks the capacity-study instrumentation instead, and needs a
+**running station** rather than a model:
+
+```bash
+python preflight.py --study --station-token "$MM_ST_AUTH_TOKEN"
+```
+
+It sets a phase, changes the batch size live, waits for a telemetry sample
+carrying both, confirms the inter-arrival, disk read/write and GPU fields are
+really being populated on this machine, reads `/api/report` and
+`/api/report.md`, and puts the phase and batch size back — including when a
+check fails part-way. Because it writes to the station, it refuses to run
+while a named run is acquiring (probing would relabel that run's samples)
+unless `--force`. See `station/README.md`, "Capacity and tuning study".
+
 Warnings are survivable; any `FAIL` means don't start the run.
 
 ### Will it keep up?

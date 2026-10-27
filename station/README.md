@@ -253,6 +253,31 @@ The phase is reset to `unlabeled` when the sweep ends or is interrupted,
 so whatever happens next is not mislabelled as part of a step that stopped
 running. It reads `MM_ST_AUTH_TOKEN` and `MM_ST_BASE` from the environment.
 
+### Checking it before the run
+
+`preflight.py --study` exercises the instrumentation against a **running**
+station: it sets a phase, changes the batch size, waits for a telemetry
+sample carrying both, checks the inter-arrival, disk read/write and GPU
+fields are actually being populated on this machine, reads both report
+endpoints, and puts the phase and batch size back.
+
+```bash
+python -m station.main --input-dir /data/lumaviewpro/output &
+python preflight.py --study --station-token "$MM_ST_AUTH_TOKEN"
+```
+
+It writes to the station, so it refuses to run while a named run is
+acquiring — probing would relabel that run's samples — unless `--force`.
+Run it before the microscope starts. The restore happens even if a check
+fails part-way; if it cannot restore, it says so and names the values to put
+back by hand.
+
+On the 5090 the three checks worth reading are the GPU block (util and VRAM
+present, not `[N/A]`), the disk line (it should name a block device, not
+`system`, or another disk's traffic lands in the numbers), and inter-arrival,
+which needs three images to land while the station is up before it reports
+anything.
+
 ### A day of it
 
 ```bash

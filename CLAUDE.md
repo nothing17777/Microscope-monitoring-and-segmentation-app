@@ -14,6 +14,8 @@ LumaViewPro itself is never modified — these apps only read its output.
   a run is a plate, every image and mask belongs to one. Adds a 96-well plate map, run
   history with chart replay, and webhook alerts. Separate DB, separate frontend.
 - `preflight.py` — fresh-workstation checks (GPU kernels, dinov3, dirs, port, throughput).
+  `--study` additionally probes a *running* station's experiment instrumentation and
+  restores the phase and batch size it changed; it refuses to run mid-acquisition.
 - `fake_producer.py` — synthetic acquisition for local testing.
 - `sweep.py` — cycles batch sizes and sets phase labels on a timer against a
   running station, so a capacity sweep runs hands-off.
@@ -47,6 +49,7 @@ python -c "import tempfile,pathlib,station.selftest as s; s.test_eta(pathlib.Pat
 # before a real run
 python preflight.py --input-dir /data/lumaviewpro/output --output-dir /data/masks
 python preflight.py --input-dir ... --throughput   # ~1.1 GB model download on first use
+python preflight.py --study --station-token "$MM_ST_AUTH_TOKEN"   # needs a running station
 
 # synthetic load (every 7th file written in slow chunks to exercise the partial-file guard)
 python fake_producer.py --out ./data/input --rate 2 --count 400 --slow-every 7

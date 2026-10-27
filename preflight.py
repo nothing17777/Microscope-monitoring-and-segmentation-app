@@ -10,10 +10,13 @@ directories are really readable/writable.
     python preflight.py --input-dir ... --load-model     # also builds cpdino
     python preflight.py --input-dir ... --segment        # also segments one image
     python preflight.py --input-dir ... --throughput     # ...and times a full-size batch
+    python preflight.py --study                          # exercise a running station's
+                                                         # experiment instrumentation
 
 Exit code 0 if nothing FAILed (warnings are allowed), 1 otherwise.
 """
 import argparse
+import json
 import os
 import shutil
 import socket
@@ -21,6 +24,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
@@ -364,6 +369,240 @@ def check_throughput(m, device: str, batch_size: int, shape: tuple[int, int], pl
                f"~{int(plan['run_s'] * seg_rate):,} images.")
 
 
+# --- the capacity study -----------------------------------------------------
+
+# Deliberately recognisable in the report afterwards, and not a name anyone
+# would use for a real phase.
+PROBE_PHASE = "preflight_check"
+PROBE_BATCH = 2
+SAMPLE_WAIT_S = 20.0
+
+
+class _Station:
+    def __init__(self, base: str, token: str | None):
+        self.base = base.rstrip("/")
+        self.token = token
+
+    def get(self, path: str, raw: bool = False):
+        with urllib.request.urlopen(f"{self.base}{path}", timeout=15) as r:
+            body = r.read()
+        return body.decode() if raw else json.loads(body or b"{}")
+
+    def post(self, path: str, body: dict) -> dict:
+        req = urllib.request.Request(
+            f"{self.base}{path}", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json",
+                     **({"X-Auth-Token": self.token} if self.token else {})},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read() or b"{}")
+
+
+def _await_sample(st: _Station, want_phase: str) -> dict | None:
+    """Wait for a telemetry sample taken after the phase change, not before it."""
+    deadline = time.time() + SAMPLE_WAIT_S
+    while time.time() < deadline:
+        try:
+            snap = st.get("/api/status")
+        except Exception:  # noqa: BLE001
+            time.sleep(1.0)
+            continue
+        if snap.get("phase") == want_phase:
+            return snap
+        time.sleep(1.0)
+    return None
+
+
+def check_study(base: str, token: str | None, force: bool) -> None:
+    """Exercise phase labels, the live batch size and the report, then undo it.
+
+    This writes to a running station: it sets a phase and a batch size and
+    puts both back. Everything it does lands in the study's own data, so it
+    refuses to run while the microscope is actually acquiring unless forced.
+    """
+    st = _Station(base, token)
+    try:
+        cfg = st.get("/api/config")
+    except urllib.error.HTTPError as e:
+        report(FAIL, "station reachable", f"{base} -> HTTP {e.code}")
+        return
+    except Exception as e:  # noqa: BLE001
+        report(FAIL, "station reachable",
+               f"{base}: {type(e).__name__}: {e}\n"
+               "          start it with: python -m station.main --input-dir ... "
+               "(or pass --station-url)")
+        return
+    report(PASS, "station reachable",
+           f"{base} — {cfg.get('model')} on {cfg.get('device')}, input {cfg.get('input_dir')}")
+    if cfg.get("dry_run"):
+        report(WARN, "station is segmenting for real",
+               "the station is running --dry-run: masks are a threshold and the timings "
+               "in the report are not Cellpose timings")
+
+    if cfg.get("auth_required") and not token:
+        report(FAIL, "study auth",
+               "the station requires a token and none was given\n"
+               "          pass --station-token, or export MM_ST_AUTH_TOKEN")
+        return
+
+    # Changing the phase mid-acquisition mislabels the real data, which is
+    # the one thing here that cannot be undone afterwards.
+    try:
+        running = [r for r in st.get("/api/runs?limit=5").get("runs", [])
+                   if r.get("status") == "running" and r.get("name") != "Unassigned"]
+    except Exception:  # noqa: BLE001
+        running = []
+    if running and not force:
+        report(FAIL, "safe to probe",
+               f"run #{running[0]['id']} ({running[0]['name']}) is acquiring; this check "
+               "would relabel its samples\n          run it before the acquisition starts, "
+               "or pass --force if you really mean to")
+        return
+    if running:
+        report(WARN, "safe to probe",
+               f"run #{running[0]['id']} is acquiring and --force was given; "
+               f"a short '{PROBE_PHASE}' phase will appear in the report")
+
+    before_phase = cfg.get("phase")
+    before_batch = cfg.get("batch_size_effective")
+    if before_phase is None or before_batch is None:
+        report(FAIL, "station has the study instrumentation",
+               "/api/config has no 'phase' or 'batch_size_effective' — this station is "
+               "running a build from before the capacity study was added")
+        return
+
+    try:
+        # --- phase ---------------------------------------------------------
+        got = st.post("/api/phase", {"name": PROBE_PHASE.replace("_", " ")})["phase"]
+        if got != PROBE_PHASE:
+            report(FAIL, "set phase", f"asked for {PROBE_PHASE!r}, station stored {got!r}")
+        else:
+            report(PASS, "set phase", f"{before_phase!r} -> {got!r} (labels are slugged)")
+
+        # --- batch size ----------------------------------------------------
+        r = st.post("/api/config/batch-size", {"n": PROBE_BATCH})
+        if r.get("batch_size") != PROBE_BATCH:
+            report(FAIL, "set batch size", f"asked for {PROBE_BATCH}, station reports {r}")
+        else:
+            report(PASS, "set batch size",
+                   f"{before_batch} -> {PROBE_BATCH}, effective on the next batch, no restart")
+
+        # --- does it reach the telemetry? -----------------------------------
+        snap = _await_sample(st, PROBE_PHASE)
+        if snap is None:
+            report(FAIL, "phase reaches telemetry",
+                   f"no sample carried phase {PROBE_PHASE!r} within {SAMPLE_WAIT_S:.0f}s — "
+                   "is the telemetry sampler running?")
+        else:
+            report(PASS, "phase reaches telemetry",
+                   f"a sample is tagged {snap['phase']!r} at batch size "
+                   f"{snap.get('worker', {}).get('batch_size')}")
+            _check_sample_fields(snap)
+    finally:
+        # Always put it back, including after a failure above: a station left
+        # on batch size 2 and a probe phase is worse than a failed check.
+        try:
+            st.post("/api/phase", {"name": before_phase})
+            st.post("/api/config/batch-size", {"n": before_batch})
+            report(PASS, "restored", f"phase {before_phase!r}, batch size {before_batch}")
+        except Exception as e:  # noqa: BLE001
+            report(FAIL, "restored",
+                   f"could not put the phase and batch size back: {e!r}\n"
+                   f"          set them by hand: phase {before_phase!r}, batch {before_batch}")
+
+    _check_report(st)
+
+
+def _check_sample_fields(snap: dict) -> None:
+    """The four things the study reads off every sample."""
+    n = snap.get("inter_arrival_n") or 0
+    if snap.get("inter_arrival_mean_s") is not None:
+        report(PASS, "inter-arrival measured",
+               f"mean {snap['inter_arrival_mean_s']:.2f}s, p95 "
+               f"{snap['inter_arrival_p95_s']:.2f}s over {n} gap(s)")
+    else:
+        report(WARN, "inter-arrival measured",
+               f"not enough data ({n} gap(s)) — correct when nothing is arriving; "
+               "it needs three images to land while the station is up")
+
+    rd, wr = snap.get("disk_read_mbs"), snap.get("disk_write_mbs")
+    dev = snap.get("disk_device")
+    if rd is None or wr is None:
+        report(FAIL, "disk read/write sampled",
+               "disk_read_mbs / disk_write_mbs are None — psutil has no IO counters here, "
+               "so disk contention cannot be told from GPU contention")
+    elif dev == "system":
+        report(WARN, "disk read/write sampled",
+               f"read {rd:.1f} / write {wr:.1f} MB/s, but counted machine-wide: the block "
+               "device behind the input dir could not be resolved,\n          so another "
+               "disk's traffic lands in these numbers")
+    else:
+        report(PASS, "disk read/write sampled",
+               f"read {rd:.1f} / write {wr:.1f} MB/s on {dev} (the input volume)")
+
+    gpu = snap.get("gpu")
+    if not gpu:
+        report(WARN, "gpu telemetry in samples",
+               "no GPU block in the sample — GPU util, VRAM and the GPU-idle fraction will "
+               "be blank in the report (expected off-NVIDIA)")
+    elif gpu.get("gpu_util_pct") is None or gpu.get("vram_used_mb") is None:
+        report(FAIL, "gpu telemetry in samples",
+               f"nvidia-smi returned a block with empty fields: {gpu} — the per-phase GPU "
+               "columns will be '—'")
+    else:
+        report(PASS, "gpu telemetry in samples",
+               f"util {gpu['gpu_util_pct']:.0f}%, VRAM {gpu['vram_used_mb']:.0f} of "
+               f"{gpu.get('vram_total_mb') or 0:.0f} MB")
+
+
+def _check_report(st: _Station) -> None:
+    try:
+        rep = st.get("/api/report")
+    except Exception as e:  # noqa: BLE001
+        report(FAIL, "GET /api/report", repr(e))
+        return
+    usable = [p for p in rep.get("phases", []) if p.get("enough_data")]
+    thin = [p for p in rep.get("phases", []) if not p.get("enough_data")]
+    report(PASS, "GET /api/report",
+           f"{rep['samples']} sample(s), {len(rep.get('phases', []))} phase(s): "
+           f"{len(usable)} with enough data, {len(thin)} reporting 'not enough data' "
+           f"(the floor is {rep['min_samples_per_phase']} samples)")
+
+    c = rep.get("contention", {})
+    if c.get("available"):
+        report(PASS, "contention headline",
+               f"concurrent at {c['percent_of_solo']:.1f}% of solo, {c['basis']}")
+    else:
+        report(WARN, "contention headline",
+               f"not available yet: {c.get('note')} — expected before the study has run")
+
+    if rep.get("tuning"):
+        sizes = ", ".join(str(t["batch_size"]) for t in rep["tuning"])
+        report(PASS, "tuning table", f"batch size(s) {sizes}")
+    else:
+        report(WARN, "tuning table",
+               "empty — no phase has held one batch size long enough yet; "
+               "that is what sweep.py is for")
+
+    try:
+        md = st.get("/api/report.md", raw=True)
+    except Exception as e:  # noqa: BLE001
+        report(FAIL, "GET /api/report.md", repr(e))
+        return
+    if md.lstrip().startswith("# Capacity and tuning report") and "## Tuning" in md:
+        report(PASS, "GET /api/report.md", f"{len(md.splitlines())} lines of markdown")
+    else:
+        report(FAIL, "GET /api/report.md", f"unexpected content: {md[:120]!r}")
+
+    dist = Path(__file__).resolve().parent / "station" / "frontend" / "dist" / "index.html"
+    if dist.is_file():
+        report(PASS, "station frontend built", str(dist.parent))
+    else:
+        report(WARN, "station frontend built",
+               "station/frontend/dist missing — the Experiment page (the phase chips you "
+               "tap from a phone) will not be served")
+
+
 # --- main -------------------------------------------------------------------
 
 def main() -> int:
@@ -385,6 +624,13 @@ def main() -> int:
     p.add_argument("--slices", type=int, default=20)
     p.add_argument("--channels", type=int, default=2)
     p.add_argument("--run-hours", type=float, default=2.0, help="planned acquisition duration")
+    p.add_argument("--study", action="store_true",
+                   help="exercise a running station's experiment instrumentation: set a "
+                        "phase, change the batch size, read the report, put it all back")
+    p.add_argument("--station-url", default=os.environ.get("MM_ST_BASE", "http://localhost:8100"))
+    p.add_argument("--station-token", default=os.environ.get("MM_ST_AUTH_TOKEN") or None)
+    p.add_argument("--force", action="store_true",
+                   help="with --study, probe even while a run is acquiring")
     a = p.parse_args()
 
     input_dir = Path(a.input_dir).expanduser().resolve()
@@ -425,6 +671,10 @@ def main() -> int:
     else:
         report(WARN, "measured throughput",
                "not measured — pass --throughput to time a real batch and project the backlog")
+
+    if a.study:
+        section("capacity study instrumentation")
+        check_study(a.station_url, a.station_token, a.force)
 
     section("storage and service")
     check_dirs(input_dir, output_dir)
