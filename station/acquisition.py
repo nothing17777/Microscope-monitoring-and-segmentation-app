@@ -103,7 +103,11 @@ class ControlledAcquisition(AcquisitionAdapter):
 def probe(input_dir: Path, enable_control: bool) -> AcquisitionAdapter:
     if not enable_control:
         return ObservedAcquisition(
-            input_dir, "control not enabled (pass --enable-acquisition-control)")
+            input_dir,
+            # Named both ways: under systemd nobody passes a flag, and this
+            # string is what the UI shows the person reading the panel.
+            "control not enabled (--enable-acquisition-control, or "
+            "MM_ST_ENABLE_ACQUISITION_CONTROL=1)")
     try:
         import lumascope_api  # type: ignore
     except Exception as e:  # noqa: BLE001

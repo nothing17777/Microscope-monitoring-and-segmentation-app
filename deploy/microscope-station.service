@@ -1,0 +1,86 @@
+# /etc/systemd/system/microscope-station.service
+#
+#   sudo cp deploy/microscope-station.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now microscope-station
+#   journalctl -u microscope-station -f
+#
+# Edit User, the paths, and MM_ST_INPUT_DIR to match the workstation.
+#
+# ---------------------------------------------------------------------------
+# IF YOU ALSO RUN microscope-monitor.service, READ THIS
+#
+# Both services run their own Cellpose worker. Pointed at the same input
+# directory they will both segment the same TIFFs: two models on one GPU,
+# double VRAM, and two sets of masks. They are safe to run together ONLY if
+# MM_ST_INPUT_DIR and MM_INPUT_DIR differ.
+#
+# To run this one alone, which is the usual choice once the station replaces
+# the dashboard:
+#
+#   sudo systemctl disable --now microscope-monitor
+#
+# Systemd cannot check this for you — the conflict is over a directory, not a
+# port, and nothing here can know whether two paths resolve to the same files.
+# ---------------------------------------------------------------------------
+[Unit]
+Description=Microscope station: run control, Cellpose segmentation, remote monitoring
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lab
+Group=lab
+WorkingDirectory=/opt/microscope-monitor
+Environment=MM_ST_INPUT_DIR=/data/lumaviewpro/output
+Environment=MM_ST_OUTPUT_DIR=/data/station-masks
+Environment=MM_ST_DB_PATH=/var/lib/microscope-monitor/station.sqlite
+Environment=MM_ST_PORT=8100
+Environment=MM_ST_BATCH_SIZE=16
+Environment=MM_ST_MODEL=cpdino
+# Cellpose model cache; keep it on a path the service user owns. Shared with
+# microscope-monitor on purpose — the weights are a 1.1 GB download.
+Environment=CELLPOSE_LOCAL_MODELS_PATH=/var/lib/microscope-monitor/cellpose
+#
+# Secrets. MM_ST_AUTH_TOKEN guards every state-changing POST; MM_ST_WEBHOOK_URL
+# is the Slack incoming webhook for unattended runs. Both belong in a file the
+# service user can read and nobody else can, not in this unit:
+#
+#   sudo install -m 600 -o lab -g lab /dev/null /etc/microscope-station.env
+#   sudo tee /etc/microscope-station.env >/dev/null <<'ENV'
+#   MM_ST_AUTH_TOKEN=...
+#   MM_ST_WEBHOOK_URL=https://hooks.slack.com/services/...
+#   ENV
+#
+# The leading - means the service still starts if the file is absent; it will
+# log that no token and no webhook are set.
+EnvironmentFile=-/etc/microscope-station.env
+#
+# Acquisition control is OFF: the lumascope_api verbs are still stubs. Turn it
+# on only once headless control is confirmed against the microscope.
+Environment=MM_ST_ENABLE_ACQUISITION_CONTROL=0
+#
+# Alert thresholds. Defaults are 300s of sustained falling-behind and 50 GB
+# free; a 96-well run writes roughly 60 GB of TIFFs, so raise the disk
+# threshold if the volume is small.
+Environment=MM_ST_FALLING_BEHIND_SECONDS=300
+Environment=MM_ST_DISK_FREE_GB=50
+#
+# Refuse to start if the GPU stack or the input dir is not ready. preflight
+# checks the shared pieces — torch, the card's kernels, dinov3, cpdino, the
+# directories, the port. Its "frontend built" check looks at frontend/dist
+# (the dashboard's), so it warns rather than fails when only the station's
+# frontend is built; that warning is expected here.
+ExecStartPre=/opt/microscope-monitor/.venv/bin/python preflight.py \
+    --input-dir ${MM_ST_INPUT_DIR} --output-dir ${MM_ST_OUTPUT_DIR} --port ${MM_ST_PORT}
+ExecStart=/opt/microscope-monitor/.venv/bin/python -m station.main
+Restart=always
+RestartSec=5
+# The worker is the point of the machine; don't let the OOM killer prefer it.
+OOMScoreAdjust=-200
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

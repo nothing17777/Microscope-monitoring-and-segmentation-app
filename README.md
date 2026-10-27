@@ -113,6 +113,8 @@ is untouched. See `station/README.md`.
 python -m station.main --input-dir /data/lumaviewpro/output --db-path ./data/station.sqlite
 ```
 
+As a service: `deploy/microscope-station.service`, the same way as this one.
+
 > Do not point both apps at the same `--input-dir` at once: each runs its own
 > segmenter and they would both segment the same TIFFs.
 

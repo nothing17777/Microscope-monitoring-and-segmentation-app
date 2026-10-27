@@ -219,6 +219,53 @@ Below 600px the panels, plate map and queue stack to one column and the
 charts collapse to sparklines. The two headline figures — images captured and
 images waiting — stay large enough to read without zooming.
 
+## As a service
+
+```bash
+sudo mkdir -p /var/lib/microscope-monitor && sudo chown lab:lab /var/lib/microscope-monitor
+sudo cp ../deploy/microscope-station.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now microscope-station
+journalctl -u microscope-station -f
+```
+
+The token and the webhook URL do not belong in the unit file. The unit reads
+them from a file only the service user can read:
+
+```bash
+sudo install -m 600 -o lab -g lab /dev/null /etc/microscope-station.env
+sudo tee /etc/microscope-station.env >/dev/null <<'ENV'
+MM_ST_AUTH_TOKEN=...
+MM_ST_WEBHOOK_URL=https://hooks.slack.com/services/...
+ENV
+sudo systemctl restart microscope-station
+```
+
+`EnvironmentFile=-` means the leading dash makes the file optional: the
+service still starts without it and logs that no token and no webhook are
+set.
+
+`ExecStartPre` runs `preflight.py` against this service's own input dir,
+output dir and port, so a missing GPU stack or an unreadable input directory
+stops the service rather than producing an hour of silent failures. Its
+"frontend built" check looks at the dashboard's `frontend/dist`, so expect
+that one to warn here; warnings do not block startup.
+
+### Running it alongside microscope-monitor
+
+Both services run their own Cellpose worker. Pointed at the same input
+directory they will both segment the same TIFFs — two models on one GPU,
+double the VRAM, two sets of masks. They are safe together **only** if
+`MM_ST_INPUT_DIR` and `MM_INPUT_DIR` differ.
+
+Systemd cannot catch this: the conflict is over a directory, not a port, and
+nothing can know whether two paths resolve to the same files. To run the
+station alone, which is the usual choice:
+
+```bash
+sudo systemctl disable --now microscope-monitor
+```
+
 ## Config
 
 | flag | env | default |
