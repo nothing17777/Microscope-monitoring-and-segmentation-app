@@ -1,527 +1,456 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
+import Queue from './Queue'
+import { getToken, setToken } from './api'
+import { usePoll, useLive } from './useLive'
+import { bytes, clock, dur, durRange, int, nf, rate } from './format'
 
 const SECTIONS = [
-  ['overview', 'Overview'],
-  ['throughput', 'Throughput'],
+  ['verdict', 'Status'],
+  ['queues', 'Queues'],
+  ['charts', 'Charts'],
   ['resources', 'Resources'],
-  ['machine-spec', 'Machine spec'],
+  ['machine', 'Machine'],
   ['failures', 'Failures'],
 ]
 
-// Chart strokes are read from the live AdminLTE/Bootstrap theme rather than
-// hardcoded, so they stay legible if the theme is switched to light.
-function themeColor(name, fallback) {
+// Chart strokes come from the live theme, so they stay correct in both modes.
+function token(name, fallback) {
   if (typeof window === 'undefined') return fallback
-  const cs = getComputedStyle(document.documentElement)
-  return (
-    cs.getPropertyValue(`--bs-${name}-text-emphasis`).trim() ||
-    cs.getPropertyValue(`--bs-${name}`).trim() ||
-    fallback
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+
+// The state colours are declared on the .state-* classes, not on :root, so
+// they have to be looked up by name here. The backlog line must agree with
+// the verdict: a green line above a red headline is worse than no colour.
+const STATE_TOKEN = {
+  idle: '--text-muted',
+  'keeping-up': '--primary',
+  slipping: '--yellow',
+  behind: '--red',
+}
+const stateColor = (key) => token(STATE_TOKEN[key] || '--primary', '#1ABB9C')
+
+// --- theme ------------------------------------------------------------------
+
+function useTheme() {
+  const [theme, setTheme] = useState(
+    () => document.documentElement.getAttribute('data-theme') || 'dark',
   )
-}
-
-// --- formatting -------------------------------------------------------------
-
-const nf = (n, d = 0) =>
-  n === null || n === undefined || Number.isNaN(n) ? '—' : Number(n).toFixed(d)
-
-function bytes(b) {
-  if (b === null || b === undefined) return '—'
-  const u = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0, v = Number(b)
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
-}
-
-function dur(s) {
-  if (s === null || s === undefined || !Number.isFinite(s)) return '—'
-  s = Math.max(0, Math.round(s))
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
-  return h ? `${h}h ${String(m).padStart(2, '0')}m`
-    : m ? `${m}m ${String(sec).padStart(2, '0')}s`
-      : `${sec}s`
-}
-
-const clock = (ts) =>
-  new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-
-// --- data -------------------------------------------------------------------
-
-function useSnapshot() {
-  const [snap, setSnap] = useState(null)
-  const [live, setLive] = useState(false)
-
   useEffect(() => {
-    let closed = false
-    let retry
-    let sock
-    const connect = () => {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      sock = new WebSocket(`${proto}://${location.host}/ws`)
-      sock.onopen = () => setLive(true)
-      sock.onmessage = (e) => setSnap(JSON.parse(e.data))
-      sock.onclose = () => {
-        setLive(false)
-        if (!closed) retry = setTimeout(connect, 2000)
-      }
-      sock.onerror = () => sock.close()
+    document.documentElement.setAttribute('data-theme', theme)
+    try { localStorage.setItem('mm_theme', theme) } catch { /* private mode */ }
+  }, [theme])
+  return [theme, () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))]
+}
+
+// --- verdict ----------------------------------------------------------------
+
+// The single question the dashboard exists to answer. Three states, each
+// named in words as well as coloured, so the page reads in grayscale.
+function verdictOf(snap) {
+  if (!snap) return { key: 'idle', cls: 'state-idle', headline: 'Connecting…', sub: '' }
+  const { backlog, falling_behind: behind, backlog_trend_per_min: trend, found } = snap
+  if (!found) {
+    return {
+      key: 'idle', cls: 'state-idle', headline: 'Waiting for images',
+      sub: 'Nothing has landed in the input folder yet. The run has not started, or LumaViewPro is writing somewhere else.',
     }
-    connect()
-    return () => { closed = true; clearTimeout(retry); sock?.close() }
-  }, [])
-
-  // Populate the tiles before the first WebSocket frame lands.
-  useEffect(() => {
-    if (snap) return
-    fetch('/api/status').then((r) => r.json()).then(setSnap).catch(() => {})
-  }, [snap])
-
-  return { snap, live }
-}
-
-function useJson(url, intervalMs) {
-  const [data, setData] = useState(null)
-  useEffect(() => {
-    let alive = true
-    const go = () =>
-      fetch(url).then((r) => r.json()).then((d) => alive && setData(d)).catch(() => {})
-    go()
-    if (!intervalMs) return () => { alive = false }
-    const id = setInterval(go, intervalMs)
-    return () => { alive = false; clearInterval(id) }
-  }, [url, intervalMs])
-  return data
-}
-
-// --- building blocks --------------------------------------------------------
-
-function SmallBox({ variant, value, unit, label, sub, icon }) {
-  return (
-    <div className="col-lg-3 col-sm-6 col-12">
-      <div className={`small-box text-bg-${variant}`}>
-        <div className="inner">
-          <h3>
-            {value}
-            {unit ? <sup className="fs-5 ms-1">{unit}</sup> : null}
-          </h3>
-          <p>
-            {label}
-            {sub ? <small>{sub}</small> : null}
-          </p>
-        </div>
-        <svg className="small-box-icon" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-          {icon}
-        </svg>
-      </div>
-    </div>
-  )
-}
-
-const ICONS = {
-  check: <><path d="M4 12.5 9.5 18 20 6" /></>,
-  stack: <><path d="M3 7.5 12 3l9 4.5-9 4.5-9-4.5Z" /><path d="M3 12l9 4.5L21 12" />
-    <path d="M3 16.5 12 21l9-4.5" /></>,
-  speed: <><circle cx="12" cy="13" r="8" /><path d="M12 13l4.5-4" /><path d="M12 2v2" /></>,
-  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></>,
-  hourglass: <><path d="M7 3h10M7 21h10" /><path d="M7 3c0 5 5 6 5 9s-5 4-5 9" />
-    <path d="M17 3c0 5-5 6-5 9s5 4 5 9" /></>,
-  disk: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="3" /></>,
-  warn: <><path d="M12 3 2 20h20L12 3Z" /><path d="M12 10v5" /><path d="M12 17.5v.5" /></>,
-  chip: <><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 3v3M15 3v3M9 18v3M15 18v3" />
-    <path d="M3 9h3M3 15h3M18 9h3M18 15h3" /></>,
-}
-
-function ChartCard({ title, id, tools, data, series, yProps = {} }) {
-  return (
-    <div className="col-xl-6 col-12">
-      <div className="card mb-4" id={id}>
-        <div className="card-header d-flex align-items-center">
-          <h3 className="card-title mb-0">{title}</h3>
-          {tools ? <div className="card-tools ms-auto">{tools}</div> : null}
-        </div>
-        <div className="card-body">
-          <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-              <CartesianGrid stroke="var(--bs-border-color)" vertical={false} />
-              <XAxis dataKey="t" stroke="var(--bs-secondary-color)"
-                     tick={{ fontSize: 13 }} minTickGap={48} />
-              <YAxis stroke="var(--bs-secondary-color)" tick={{ fontSize: 13 }}
-                     width={58} {...yProps} />
-              <Tooltip
-                contentStyle={{
-                  background: 'var(--bs-body-bg)',
-                  border: '1px solid var(--bs-border-color)',
-                  borderRadius: 'var(--bs-border-radius)',
-                  fontSize: 14,
-                }}
-                labelStyle={{ color: 'var(--bs-secondary-color)' }}
-              />
-              <Legend wrapperStyle={{ fontSize: 14 }} />
-              {series.map((s) => (
-                <Line key={s.key} type="monotone" dataKey={s.key} name={s.name}
-                      stroke={s.color} strokeWidth={2.5} dot={false}
-                      isAnimationActive={false} connectNulls />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function SpecCard() {
-  const specs = useJson('/api/specs', 0)
-  const [copied, setCopied] = useState(false)
-  const text = specs?.text || ''
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      ta.remove()
-    }
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1800)
   }
+  if (behind) {
+    return {
+      key: 'behind', cls: 'state-bad', headline: 'Falling behind',
+      sub: `Backlog is growing by about ${nf(trend, 0)} images a minute. Segmentation cannot keep up with acquisition at this rate.`,
+    }
+  }
+  if (backlog > 0 && trend > 0) {
+    return {
+      key: 'slipping', cls: 'state-warn', headline: 'Slipping',
+      sub: 'The backlog is rising slowly. Watch it — it has not yet crossed into falling behind.',
+    }
+  }
+  return {
+    key: 'keeping-up', cls: 'state-ok', headline: 'Keeping up',
+    sub: 'Segmentation is clearing images at least as fast as they arrive.',
+  }
+}
+
+// Rank, so the flash fires only when things get worse. A run that wobbles
+// across the slipping threshold would otherwise blink all afternoon.
+const SEVERITY = { idle: 0, 'keeping-up': 0, slipping: 1, behind: 2 }
+
+function Verdict({ snap }) {
+  const v = verdictOf(snap)
+  const prev = useRef(v.key)
+  const [flash, setFlash] = useState(false)
+  useEffect(() => {
+    const worse = SEVERITY[v.key] > SEVERITY[prev.current]
+    prev.current = v.key
+    if (!worse) return undefined
+    setFlash(true)
+    const t = setTimeout(() => setFlash(false), 1300)
+    return () => clearTimeout(t)
+  }, [v.key])
 
   return (
-    <div className="col-xl-6 col-12">
-      <div className="card mb-4" id="machine-spec">
-        <div className="card-header d-flex align-items-center">
-          <h3 className="card-title mb-0">Machine spec</h3>
-          <div className="card-tools ms-auto d-flex gap-2">
-            <button type="button" className="btn btn-sm btn-primary" onClick={copy}>
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-            <a className="btn btn-sm btn-outline-secondary" href="/api/specs.txt"
-               target="_blank" rel="noreferrer">specs.txt</a>
-          </div>
-        </div>
-        <div className="card-body">
-          <pre className="spec-dump text-body-secondary mb-0">{text || 'capturing…'}</pre>
-        </div>
+    <section id="verdict" className={`verdict ${v.cls} ${flash ? 'just-changed' : ''}`}>
+      <div>
+        <div className="verdict-headline">{v.headline}</div>
+        <p className="verdict-sub">{v.sub}</p>
       </div>
+      <div className="verdict-figure">
+        <span className="verdict-number metric-value" style={{ color: 'var(--state)' }}>
+          {int(snap?.backlog ?? 0)}
+        </span>
+        <span className="verdict-unit">
+          {snap?.backlog === 1 ? 'image waiting' : 'images waiting'}
+        </span>
+      </div>
+    </section>
+  )
+}
+
+// --- tiles ------------------------------------------------------------------
+
+function Metric({ label, value, unit, sub, state }) {
+  return (
+    <div className={`metric ${state ? `is-state ${state}` : ''}`}>
+      <div className="metric-label">{label}</div>
+      <div className="metric-value">
+        {value}{unit ? <span className="unit">{unit}</span> : null}
+      </div>
+      <div className="metric-sub">{sub}</div>
     </div>
   )
 }
 
-function FailuresCard() {
-  const data = useJson('/api/failures', 10000)
-  const rows = data?.failures || []
+// --- charts -----------------------------------------------------------------
+
+function Chart({ data, lines, hero, yLabel }) {
+  const grid = token('--border-color', '#333')
+  const muted = token('--text-muted', '#888')
+  const surface = token('--bg-surface', '#1a2332')
   return (
-    <div className="col-xl-6 col-12">
-      <div className="card mb-4" id="failures">
-        <div className="card-header d-flex align-items-center">
-          <h3 className="card-title mb-0">Failed files</h3>
-          <div className="card-tools ms-auto">
-            <span className={`badge ${rows.length ? 'text-bg-danger' : 'text-bg-secondary'}`}>
-              {rows.length}
-            </span>
+    <div className={hero ? 'chart-box-hero' : 'chart-box'}>
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: -12 }}>
+          <CartesianGrid stroke={grid} strokeDasharray="2 4" vertical={false} />
+          <XAxis dataKey="t" tick={{ fill: muted, fontSize: 11 }} stroke={grid}
+                 tickLine={false} minTickGap={48} />
+          <YAxis tick={{ fill: muted, fontSize: 11 }} stroke={grid} tickLine={false}
+                 width={46} allowDecimals={false}
+                 label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft',
+                                   fill: muted, fontSize: 11 } : undefined} />
+          <Tooltip
+            contentStyle={{ background: surface, border: `1px solid ${grid}`,
+                            borderRadius: 6, fontSize: 12 }}
+            labelStyle={{ color: muted }} />
+          {lines.map((l) => (
+            // Thin, unfilled, directly labelled. No legend, no dots.
+            <Line key={l.key} type="monotone" dataKey={l.key} name={l.name}
+                  stroke={l.color} strokeWidth={1.75} dot={false} isAnimationActive={false} />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function Card({ id, title, aside, children, note }) {
+  return (
+    <section className="card" id={id}>
+      <div className="card-header">
+        <h3 className="card-title">{title}</h3>
+        {aside}
+      </div>
+      <div className="card-body">
+        {children}
+        {note ? <p className="chart-note" style={{ marginTop: 8 }}>{note}</p> : null}
+      </div>
+    </section>
+  )
+}
+
+// --- shell ------------------------------------------------------------------
+
+function TokenBox({ required }) {
+  const [value, setValue] = useState(getToken())
+  const [saved, setSaved] = useState(false)
+  if (!required) return null
+  return (
+    <form
+      className="inline-form"
+      onSubmit={(e) => { e.preventDefault(); setToken(value); setSaved(true); setTimeout(() => setSaved(false), 2000) }}
+    >
+      <div className="field" style={{ flex: '1 1 12rem' }}>
+        <label htmlFor="tok">Access token</label>
+        <input id="tok" type="password" value={value} autoComplete="off"
+               placeholder="required to pause, cancel or queue"
+               onChange={(e) => setValue(e.target.value)} />
+      </div>
+      <button className="btn btn-primary">{saved ? 'Saved' : 'Save'}</button>
+    </form>
+  )
+}
+
+export default function App() {
+  const { snap, connected, stale, refresh } = useLive()
+  const [theme, toggleTheme] = useTheme()
+  const [navOpen, setNavOpen] = useState(false)
+  const history = usePoll('/api/history?minutes=30', 10000)
+  const config = usePoll('/api/config', 60000)
+  const specs = usePoll('/api/specs', 0)
+  const failures = usePoll('/api/failures', 15000)
+  const [queueNonce, setQueueNonce] = useState(0)
+  const queue = snap?.queue
+
+  // Re-render charts when the theme flips so stroke colours follow.
+  const [, force] = useState(0)
+  useEffect(() => { force((n) => n + 1) }, [theme])
+
+  const series = useMemo(() => {
+    const s = history?.samples ?? []
+    return s.map((d) => ({
+      t: clock(d.ts),
+      backlog: d.backlog,
+      segmented: d.segmented,
+      found: d.found,
+      rate: Number((d.current_rate ?? 0).toFixed(3)),
+      cpu: d.cpu_pct,
+      ram: d.ram_pct,
+      gpu: d.gpu?.gpu_util_pct ?? null,
+      vram: d.gpu?.vram_used_mb ?? null,
+    }))
+  }, [history])
+
+  const v = verdictOf(snap)
+  const eta = snap?.eta_confidence && snap.eta_confidence !== 'none'
+    ? durRange(snap.eta_low, snap.eta_high)
+    : null
+
+  return (
+    <>
+      <a className="skip-link" href="#main-content">Skip to content</a>
+
+      <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
+        <div className="sidebar-brand">
+          <span className="brand-name">Microscope Monitor</span>
+        </div>
+        <nav className="sidebar-nav">
+          <div className="nav-group">
+            <div className="nav-label">Dashboard</div>
+            {SECTIONS.map(([id, label]) => (
+              <a key={id} className="nav-link" href={`#${id}`} onClick={() => setNavOpen(false)}>
+                {label}
+              </a>
+            ))}
+          </div>
+        </nav>
+        <div className="sidebar-footer">
+          <div className="sidebar-user">
+            <div className="sidebar-user-info">
+              <div className="name">{config?.device ?? '—'}</div>
+              <div className="role">{config?.model ?? '—'}</div>
+            </div>
           </div>
         </div>
-        <div className="card-body p-0">
-          {rows.length === 0 ? (
-            <p className="text-body-secondary px-3 py-3 mb-0">No failures.</p>
-          ) : (
-            <div style={{ maxHeight: 420, overflow: 'auto' }}>
-              <table className="table table-sm table-striped table-failures mb-0">
-                <thead className="sticky-top">
-                  <tr><th>When</th><th>File</th><th>Error</th></tr>
-                </thead>
+      </aside>
+      <div className="sidebar-backdrop" hidden={!navOpen} onClick={() => setNavOpen(false)} />
+
+      <header className="topbar">
+        <div className="topbar-left">
+          <button className="sidebar-toggle" onClick={() => setNavOpen((o) => !o)}
+                  aria-label="Toggle navigation">☰</button>
+          <nav className="breadcrumb">
+            <span className="current">{v.headline}</span>
+          </nav>
+        </div>
+        <div className="topbar-right">
+          <span className="muted" style={{ fontSize: 12 }}>
+            {connected ? 'live' : 'reconnecting'}
+          </span>
+          {/* Gentelella's .theme-toggle rules show only the icon for the state
+              the click leads to: a sun while dark, a moon while light. */}
+          <button className="btn btn-ghost btn-sm theme-toggle" onClick={toggleTheme}
+                  aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
+            <svg className="theme-icon-light" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
+                 aria-hidden="true">
+              <circle cx="12" cy="12" r="4.2" />
+              <path d="M12 2.6v2.1M12 19.3v2.1M4.2 4.2l1.5 1.5M18.3 18.3l1.5 1.5M2.6 12h2.1M19.3 12h2.1M4.2 19.8l1.5-1.5M18.3 5.7l1.5-1.5" />
+            </svg>
+            <svg className="theme-icon-dark" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"
+                 strokeLinejoin="round" aria-hidden="true">
+              <path d="M20.5 14.4A8.5 8.5 0 1 1 9.6 3.5a6.8 6.8 0 0 0 10.9 10.9Z" />
+            </svg>
+            <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
+          </button>
+        </div>
+      </header>
+
+      <main className="main" id="main-content">
+        <div className="page-wrapper stack">
+          <div className="page-header page-header-row">
+            <div>
+              <div className="page-pretitle">
+                {config?.dry_run ? 'DRY RUN — masks are a threshold, not Cellpose' : 'Live run'}
+              </div>
+              <h1 className="page-title">Acquisition &amp; segmentation</h1>
+            </div>
+          </div>
+
+          {stale ? (
+            <div className="notice state-warn">
+              <strong>Not updating.</strong>
+              No data for more than 15 seconds — the numbers below are the last ones received.
+              {connected ? ' The connection is open but quiet.' : ' Reconnecting…'}
+              <button className="btn btn-ghost btn-sm" onClick={refresh}>Retry now</button>
+            </div>
+          ) : null}
+          {!connected && !stale ? (
+            <div className="notice state-idle">
+              <strong>Reconnecting.</strong> The live feed dropped; retrying with backoff.
+            </div>
+          ) : null}
+          {queue?.global_pause ? (
+            <div className="notice state-warn">
+              <strong>Segmentation is paused.</strong> Files are still being discovered and the
+              backlog is growing. Resume the worker in the Segmentation panel.
+            </div>
+          ) : null}
+          {snap?.set_aside ? (
+            <div className="notice state-idle">
+              <strong>{int(snap.set_aside)} images set aside.</strong> A cancelled job left them
+              unsegmented. They are not failures and are not counted in the backlog.
+            </div>
+          ) : null}
+
+          <Verdict snap={snap} />
+
+          <div className="row col-4">
+            <Metric label="Segmentation rate" value={rate(snap?.current_rate)} unit="img/s"
+                    state={v.cls}
+                    sub={`30s average · ${rate(snap?.avg_rate)} img/s overall`} />
+            <Metric label="Backlog trend" value={nf(snap?.backlog_trend_per_min, 1)} unit="img/min"
+                    state={v.cls}
+                    sub={snap?.backlog_trend_per_min > 0 ? 'growing' : 'flat or clearing'} />
+            <Metric label="Time to clear backlog" value={eta ?? '—'}
+                    sub={eta ? snap.eta_note : (snap?.eta_note ?? 'not enough data')} />
+            <Metric label="Segmented" value={int(snap?.segmented)}
+                    sub={`of ${int(snap?.found)} found · ${int(snap?.failed)} failed`} />
+          </div>
+
+          <div id="queues">
+            <Queue queue={queue} onChanged={() => { refresh(); setQueueNonce((n) => n + 1) }} />
+          </div>
+
+          <div id="charts" className="stack">
+            <Card title="Backlog"
+                  aside={<span className="chart-note">images waiting, last 30 min</span>}
+                  note="This is the chart that answers the question: a flat or falling line means the machine is coping.">
+              <Chart hero data={series} yLabel="images"
+                     lines={[{ key: 'backlog', name: 'Backlog', color: stateColor(v.key) }]} />
+            </Card>
+
+            <div className="row col-2">
+              <Card title="Throughput" aside={<span className="chart-note">images/s</span>}>
+                <Chart data={series}
+                       lines={[{ key: 'rate', name: 'img/s', color: token('--primary', '#1ABB9C') }]} />
+              </Card>
+              <Card title="Found vs segmented" aside={<span className="chart-note">cumulative</span>}>
+                <Chart data={series} lines={[
+                  { key: 'found', name: 'Found', color: token('--text-muted', '#8a93a3') },
+                  { key: 'segmented', name: 'Segmented', color: token('--primary', '#1ABB9C') },
+                ]} />
+              </Card>
+            </div>
+          </div>
+
+          <div id="resources" className="row col-2">
+            <Card title="Compute"
+                  aside={<span className="chart-note">{snap?.gpu ? 'GPU / CPU / RAM' : 'CPU / RAM — no NVIDIA GPU'}</span>}>
+              <Chart data={series} lines={[
+                { key: 'cpu', name: 'CPU %', color: token('--azure', '#4299e1') },
+                { key: 'ram', name: 'RAM %', color: token('--text-muted', '#8a93a3') },
+                ...(snap?.gpu ? [{ key: 'gpu', name: 'GPU %', color: token('--primary', '#1ABB9C') }] : []),
+              ]} />
+            </Card>
+            <Card title="Host">
+              <div className="row col-2">
+                <Metric label="CPU" value={nf(snap?.cpu_pct, 0)} unit="%" sub=" " />
+                <Metric label="RAM" value={nf(snap?.ram_pct, 0)} unit="%"
+                        sub={`${bytes(snap?.ram_used_bytes)} of ${bytes(snap?.ram_total_bytes)}`} />
+                <Metric label="Disk free" value={bytes(snap?.disk_free_bytes)}
+                        sub={`of ${bytes(snap?.disk_total_bytes)}`} />
+                <Metric label="Input on disk" value={bytes(snap?.input_bytes)}
+                        sub={`${int(snap?.worker?.input_files_on_disk)} TIFFs`} />
+                {snap?.gpu ? (
+                  <>
+                    <Metric label="GPU" value={nf(snap.gpu.gpu_util_pct, 0)} unit="%"
+                            sub={`${nf(snap.gpu.gpu_temp_c, 0)}°C · ${nf(snap.gpu.gpu_power_w, 0)} W`} />
+                    <Metric label="VRAM" value={nf(snap.gpu.vram_used_mb, 0)} unit="MB"
+                            sub={`of ${nf(snap.gpu.vram_total_mb, 0)} MB`} />
+                  </>
+                ) : null}
+                <Metric label="Batch size" value={int(snap?.worker?.batch_size)}
+                        sub={`${int(snap?.worker?.oom_events)} OOM retries`} />
+                <Metric label="Uptime" value={dur(snap?.elapsed_s)} sub=" " />
+              </div>
+            </Card>
+          </div>
+
+          <Card id="machine" title="Machine spec"
+                aside={(
+                  <button className="btn btn-ghost btn-sm"
+                          onClick={() => navigator.clipboard?.writeText(specs?.text ?? '')}>
+                    Copy
+                  </button>
+                )}>
+            <pre className="spec-dump">{specs?.text || 'Capturing…'}</pre>
+          </Card>
+
+          <Card id="failures" title="Failures"
+                aside={<span className="chart-note">{int(failures?.failures?.length ?? 0)} total</span>}>
+            {failures?.failures?.length ? (
+              <table className="table table-failures">
+                <thead><tr><th>File</th><th>When</th><th>Error</th></tr></thead>
                 <tbody>
-                  {rows.map((r) => (
-                    <tr key={r.path}>
-                      <td className="text-nowrap">{r.done_at ? clock(r.done_at) : '—'}</td>
-                      <td style={{ wordBreak: 'break-all' }}>{r.path}</td>
-                      <td className="error text-danger-emphasis">{r.error}</td>
+                  {failures.failures.slice(0, 50).map((f) => (
+                    <tr key={f.path}>
+                      <td className="cell-mono">{f.path.split('/').slice(-2).join('/')}</td>
+                      <td className="num">{f.done_at ? clock(f.done_at) : '—'}</td>
+                      <td className="error">{f.error}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
+            ) : (
+              <p className="muted" style={{ margin: 0 }}>
+                No failures. Unreadable files are retried five times before they land here.
+              </p>
+            )}
+          </Card>
 
-// --- page -------------------------------------------------------------------
-
-export default function App() {
-  const { snap, live } = useSnapshot()
-  const cfg = useJson('/api/config', 0)
-  const [histMin, setHistMin] = useState(60)
-  const hist = useJson(`/api/history?minutes=${histMin}`, 5000)
-
-  const C = useMemo(() => ({
-    found: themeColor('info', '#6edff6'),
-    segmented: themeColor('success', '#75b798'),
-    backlog: themeColor('warning', '#ffda6a'),
-    failed: themeColor('danger', '#ea868f'),
-    gpu: themeColor('primary', '#6ea8fe'),
-    cpu: themeColor('success', '#75b798'),
-    ram: themeColor('warning', '#ffda6a'),
-    vram: themeColor('info', '#6edff6'),
-  }), [])
-
-  const series = useMemo(() => {
-    const s = hist?.samples || []
-    return s.map((x) => ({
-      t: clock(x.ts),
-      found: x.found,
-      segmented: x.segmented,
-      backlog: x.backlog,
-      failed: x.failed,
-      gpu: x.gpu?.gpu_util_pct ?? null,
-      vram: x.gpu?.vram_used_mb != null ? x.gpu.vram_used_mb / 1024 : null,
-      cpu: x.cpu_pct,
-      ram: x.ram_total_bytes ? (100 * x.ram_used_bytes) / x.ram_total_bytes : null,
-    }))
-  }, [hist])
-
-  const behind = !!snap?.falling_behind
-  const gpu = snap?.gpu
-  const pct = snap?.found ? (100 * snap.segmented) / snap.found : null
-
-  return (
-    <div className="app-wrapper">
-      <nav className="app-header navbar navbar-expand bg-body">
-        <div className="container-fluid">
-          <ul className="navbar-nav">
-            <li className="nav-item">
-              <a className="nav-link" data-lte-toggle="sidebar" href="#" role="button"
-                 aria-label="Toggle sidebar">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-                     stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                  <path d="M3 6h18M3 12h18M3 18h18" />
-                </svg>
-              </a>
-            </li>
-          </ul>
-          <ul className="navbar-nav ms-auto align-items-center gap-2">
-            <li className="nav-item">
-              <span className={`badge ${live ? 'text-bg-success' : 'text-bg-danger'}`}>
-                {live ? 'LIVE' : 'RECONNECTING'}
-              </span>
-            </li>
-            <li className="nav-item">
-              <span className="badge text-bg-secondary">
-                device <strong>{cfg?.device?.toUpperCase() || '—'}</strong>
-              </span>
-            </li>
-            <li className="nav-item">
-              <span className="badge text-bg-secondary">
-                model <strong>{cfg?.model || '—'}</strong>
-              </span>
-            </li>
-            <li className="nav-item">
-              <span className="badge text-bg-secondary">
-                batch <strong>{snap?.worker?.batch_size ?? cfg?.batch_size ?? '—'}</strong>
-              </span>
-            </li>
-            {snap?.worker?.oom_events ? (
-              <li className="nav-item">
-                <span className="badge text-bg-warning">
-                  OOM retries <strong>{snap.worker.oom_events}</strong>
-                </span>
-              </li>
+          <Card title="Access">
+            <TokenBox required={config?.auth_required} />
+            {!config?.auth_required ? (
+              <p className="muted" style={{ margin: 0 }}>
+                No token is set, so anyone who can reach this page can pause, cancel and queue
+                jobs. Set <code>MM_AUTH_TOKEN</code> before exposing it beyond a trusted network.
+              </p>
             ) : null}
-          </ul>
-        </div>
-      </nav>
+          </Card>
 
-      <aside className="app-sidebar bg-body-secondary shadow">
-        <div className="sidebar-brand">
-          <a href="#overview" className="brand-link">
-            <svg className="brand-image opacity-75" width="28" height="28" viewBox="0 0 24 24"
-                 fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-              <circle cx="12" cy="12" r="3.2" />
-              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
-              <path d="M5 5l2.2 2.2M16.8 16.8 19 19M19 5l-2.2 2.2M7.2 16.8 5 19" />
-            </svg>
-            <span className="brand-text fw-light">Microscope Monitor</span>
-          </a>
-        </div>
-        <div className="sidebar-wrapper">
-          <nav className="mt-2">
-            <ul className="nav sidebar-menu flex-column" role="menu">
-              {SECTIONS.map(([id, label]) => (
-                <li className="nav-item" key={id}>
-                  <a href={`#${id}`} className="nav-link">
-                    <p>{label}</p>
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </nav>
-        </div>
-      </aside>
-
-      <main className="app-main">
-        <div className="app-content-header">
-          <div className="container-fluid">
-            <div className="row align-items-center">
-              <div className="col-sm-6">
-                <h3 className="mb-0">Acquisition &amp; segmentation</h3>
-              </div>
-              <div className="col-sm-6 text-sm-end small text-body-secondary">
-                <span className="text-truncate d-inline-block" style={{ maxWidth: '100%' }}>
-                  input {cfg?.input_dir || '—'}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="app-content">
-          <div className="container-fluid" id="overview">
-
-            <div
-              id="backlog-banner"
-              className={`card mb-4 border-2 ${behind
-                ? 'border-danger falling-behind' : 'border-success'}`}
-            >
-              <div className="card-body d-flex flex-wrap align-items-center gap-4">
-                <div className="text-center">
-                  <div className="text-uppercase text-body-secondary small fw-semibold">
-                    Backlog
-                  </div>
-                  <div className={`backlog-number ${behind ? 'text-danger' : 'text-success'}`}>
-                    {snap ? snap.backlog : '—'}
-                  </div>
-                </div>
-                <div className="flex-grow-1">
-                  <div className={`verdict ${behind ? 'text-danger' : 'text-success'}`}>
-                    {behind ? 'SEGMENTATION FALLING BEHIND' : 'KEEPING UP'}
-                  </div>
-                  <div className="text-body-secondary mt-1">
-                    backlog trend over last 5 min:{' '}
-                    <strong>
-                      {snap
-                        ? `${snap.backlog_trend_per_min > 0 ? '+' : ''}${nf(snap.backlog_trend_per_min, 1)} images/min`
-                        : '—'}
-                    </strong>
-                    {' · '}segmenting {nf(snap?.current_rate, 2)} img/s
-                    {' vs '}{nf(snap?.avg_rate, 2)} img/s average
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="row">
-              <SmallBox
-                variant="success" icon={ICONS.check}
-                value={snap ? snap.segmented : '—'}
-                unit={snap ? `/ ${snap.found}` : null}
-                label="Segmented / found"
-                sub={pct === null ? null : `${nf(pct, 1)}% complete`}
-              />
-              <SmallBox
-                variant={behind ? 'danger' : 'warning'} icon={ICONS.stack}
-                value={snap ? snap.backlog : '—'}
-                label="Backlog" sub="pending, size-stable files"
-              />
-              <SmallBox
-                variant="primary" icon={ICONS.speed}
-                value={nf(snap?.current_rate, 2)} unit="img/s"
-                label="Current rate" sub={`${nf(snap?.avg_rate, 2)} img/s average`}
-              />
-              <SmallBox
-                variant="secondary" icon={ICONS.clock}
-                value={dur(snap?.acquisition_elapsed_s)}
-                label="Elapsed" sub={`app up ${dur(snap?.elapsed_s)}`}
-              />
-              <SmallBox
-                variant="secondary" icon={ICONS.hourglass}
-                value={dur(snap?.eta_s)}
-                label="ETA to drain" sub="at the current rate"
-              />
-              <SmallBox
-                variant="info" icon={ICONS.disk}
-                value={bytes(snap?.disk_free_bytes)}
-                label="Disk free"
-                sub={`${bytes(snap?.input_bytes)} written to input dir`}
-              />
-              <SmallBox
-                variant={snap?.failed ? 'danger' : 'secondary'} icon={ICONS.warn}
-                value={snap ? snap.failed : '—'}
-                label="Failed" sub="listed below"
-              />
-              <SmallBox
-                variant="primary" icon={ICONS.chip}
-                value={gpu ? nf(gpu.gpu_util_pct) : 'n/a'} unit={gpu ? '%' : null}
-                label="GPU"
-                sub={gpu
-                  ? `${nf(gpu.vram_used_mb / 1024, 1)} / ${nf(gpu.vram_total_mb / 1024, 1)} GB · ${nf(gpu.gpu_temp_c)}°C · ${nf(gpu.gpu_power_w)} W`
-                  : 'no nvidia-smi on this machine'}
-              />
-            </div>
-
-            <div className="row" id="throughput">
-              <ChartCard
-                title="Images found vs segmented" data={series}
-                tools={
-                  <select
-                    className="form-select form-select-sm"
-                    value={histMin}
-                    onChange={(e) => setHistMin(Number(e.target.value))}
-                    aria-label="History window"
-                  >
-                    {[5, 15, 30, 60, 180].map((m) => (
-                      <option key={m} value={m}>last {m} min</option>
-                    ))}
-                  </select>
-                }
-                series={[
-                  { key: 'found', name: 'found', color: C.found },
-                  { key: 'segmented', name: 'segmented', color: C.segmented },
-                ]}
-              />
-              <ChartCard
-                title="Backlog" data={series}
-                series={[
-                  { key: 'backlog', name: 'backlog', color: C.backlog },
-                  { key: 'failed', name: 'failed', color: C.failed },
-                ]}
-              />
-            </div>
-
-            <div className="row" id="resources">
-              <ChartCard
-                title="GPU utilisation (%) and VRAM (GB)" data={series}
-                series={[
-                  { key: 'gpu', name: 'GPU util %', color: C.gpu },
-                  { key: 'vram', name: 'VRAM GB', color: C.vram },
-                ]}
-              />
-              <ChartCard
-                title="CPU (%) and RAM (%)" data={series} yProps={{ domain: [0, 100] }}
-                series={[
-                  { key: 'cpu', name: 'CPU %', color: C.cpu },
-                  { key: 'ram', name: 'RAM %', color: C.ram },
-                ]}
-              />
-            </div>
-
-            <div className="row">
-              <SpecCard />
-              <FailuresCard />
-            </div>
-
-          </div>
+          <footer className="footer">
+            <span className="muted">
+              {config ? `${config.model} on ${config.device} · input ${config.input_dir}` : ''}
+            </span>
+          </footer>
         </div>
       </main>
-    </div>
+    </>
   )
 }

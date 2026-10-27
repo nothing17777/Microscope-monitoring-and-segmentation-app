@@ -6,12 +6,17 @@ One background thread. Each cycle:
      (LumaViewPro writes incrementally; a growing file is never queued)
   3. segment pending files in dimension-homogeneous batches
 
-State lives in SQLite, so a restart resumes and never redoes work.
+Discovered files are attached to a segmentation job, so the queue panel has
+something real to show and so a job can be paused or cancelled independently
+of the worker as a whole.
+
+State lives in SQLite, so a restart resumes and never redoes work — including
+the global pause flag.
 """
 import logging
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +73,40 @@ class Worker:
         # Reads that failed because the file was still truncated. Retried on
         # later polls rather than failed outright.
         self._read_retries: dict[str, int] = {}
+        # Per-image seconds for recent batches; the ETA range is built from
+        # their spread rather than from a single running average.
+        self._batch_times: deque[float] = deque(maxlen=20)
+        self._cancelled: set[int] = set()
+        self.current_job_id: int | None = None
+        self.paused_reason: str | None = None
 
     MAX_READ_RETRIES = 5
+
+    # --- queue plumbing ----------------------------------------------------
+
+    def recent_per_image_seconds(self) -> list[float]:
+        return list(self._batch_times)
+
+    def request_cancel(self, job_id: int) -> None:
+        """Stop pulling work for this job after the current batch finishes."""
+        self._cancelled.add(job_id)
+
+    def _globally_paused(self) -> bool:
+        from .jobs import GLOBAL_PAUSE_KEY
+
+        return bool(self.db.kv_get(GLOBAL_PAUSE_KEY, False))
+
+    def _job_for_new_files(self) -> int:
+        """The segmentation job newly discovered files belong to."""
+        job = self.db.open_segmentation_job()
+        if job is None:
+            job_id = self.db.create_job("segmentation", {"source": "auto"})
+            adopted = self.db.orphan_pending_to(job_id)
+            if adopted:
+                self.db.bump_job(job_id, total=adopted)
+                log.info("segmentation job #%s adopted %d pending file(s)", job_id, adopted)
+            return job_id
+        return int(job["id"])
 
     # --- lifecycle ---------------------------------------------------------
 
@@ -120,8 +157,14 @@ class Worker:
             except Exception:  # noqa: BLE001
                 log.exception("scan failed")
             # Drain whatever is ready before the next scan, but keep scanning
-            # often enough that the backlog number stays honest.
+            # often enough that the backlog number stays honest. A pause is
+            # checked here, between batches: the batch in flight always runs
+            # to completion so no file is left half-segmented.
             while not self._stop.is_set():
+                if self._globally_paused():
+                    self.paused_reason = "worker paused globally"
+                    break
+                self.paused_reason = None
                 try:
                     did = self.segment_one_batch()
                 except Exception:  # noqa: BLE001
@@ -158,6 +201,7 @@ class Worker:
 
         known = self.db.known_paths()
         enqueued = 0
+        job_id: int | None = None
         seen: dict[str, tuple[int, float]] = {}
         for path, size in sizes.items():
             prev = self._seen.get(path)
@@ -180,19 +224,26 @@ class Worker:
                 n = self._read_retries.get(path, 0) + 1
                 self._read_retries[path] = n
                 if n >= self.MAX_READ_RETRIES:
-                    self.db.add_pending(path, size, None, None)
+                    if job_id is None:
+                        job_id = self._job_for_new_files()
+                    self.db.add_pending(path, size, None, None, job_id=job_id)
                     self.db.mark_failed(path, f"unreadable after {n} attempts: {e!r}")
+                    self.db.bump_job(job_id, failed=1, total=1)
                     log.warning("unreadable TIFF %s: %r", path, e)
                 else:
                     seen[path] = (size, now)  # restart the stability clock
                     log.info("not readable yet (attempt %d), will retry: %s", n, path)
                 continue
             self._read_retries.pop(path, None)
-            self.db.add_pending(path, size, w, h)
+            if job_id is None:
+                job_id = self._job_for_new_files()
+            self.db.add_pending(path, size, w, h, job_id=job_id)
             enqueued += 1
         self._seen = seen
-        if enqueued:
-            log.info("enqueued %d file(s); %d TIFF(s) on disk", enqueued, len(sizes))
+        if enqueued and job_id is not None:
+            self.db.bump_job(job_id, total=enqueued)
+            log.info("enqueued %d file(s) into segmentation job #%s; %d TIFF(s) on disk",
+                     enqueued, job_id, len(sizes))
         return enqueued
 
     # --- segmentation ------------------------------------------------------
@@ -202,11 +253,31 @@ class Worker:
 
         Returns True if a batch was attempted.
         """
+        job = self.db.next_runnable_segmentation_job()
+        if job is None:
+            self.current_job_id = None
+            return False
+        job_id = int(job["id"])
+        if job_id in self._cancelled:
+            # Cancelled between batches. Its files stay pending, not failed,
+            # and are adopted by the next job that opens.
+            self._cancelled.discard(job_id)
+            self.current_job_id = None
+            return False
+
         # Over-fetch so grouping by dimensions can still fill a batch when
         # channels/z-slices of different sizes are interleaved.
-        rows = self.db.pending(self.batch_size * 8)
+        rows = self.db.pending(self.batch_size * 8, job_id=job_id)
         if not rows:
+            if job["status"] == "running":
+                self.db.update_job(job_id, status="done", finished_at=time.time())
+                log.info("segmentation job #%s complete", job_id)
+            self.current_job_id = None
             return False
+
+        if job["status"] == "queued":
+            self.db.update_job(job_id, status="running", started_at=time.time())
+        self.current_job_id = job_id
 
         groups: dict[tuple[Any, Any], list[str]] = defaultdict(list)
         for r in rows:
@@ -231,6 +302,7 @@ class Worker:
         if not kept:
             return True
 
+        t0 = time.time()
         masks = self._run_model(images)
         if masks is None:
             # Model-level failure (OOM that survived halving, or a backend
@@ -238,15 +310,21 @@ class Worker:
             # don't spin on them.
             return False
 
+        self._batch_times.append((time.time() - t0) / max(1, len(kept)))
+
+        ok = failed = 0
         for path, mask in zip(kept, masks):
             try:
                 out = self._mask_path(Path(path))
                 out.parent.mkdir(parents=True, exist_ok=True)
                 np.save(str(out), np.asarray(mask))
                 self.db.mark_done(path, str(out))
+                ok += 1
             except Exception as e:  # noqa: BLE001
                 self.db.mark_failed(path, f"mask write failed: {e!r}")
                 log.exception("mask write failed for %s", path)
+                failed += 1
+        self.db.bump_job(job_id, completed=ok, failed=failed)
         return True
 
     def _mask_path(self, src: Path) -> Path:
@@ -319,4 +397,7 @@ class Worker:
             "input_files_on_disk": self.input_files_on_disk,
             "last_scan_at": self.last_scan_at,
             "dry_run": self.cfg.dry_run,
+            "current_job_id": self.current_job_id,
+            "paused_reason": self.paused_reason,
+            "batches_timed": len(self._batch_times),
         }

@@ -1,0 +1,12 @@
+// Gentelella v4 supplies the design system: tokens (including the dark
+// theme), the layout shell, and the component and form primitives. It is
+// self-contained — no Bootstrap, no jQuery — so it replaces both outright.
+// Only the partials this dashboard actually uses are pulled in.
+// Relative, not a bare package specifier: gentelella's `exports` map does not
+// expose its SCSS sources, so Vite's resolver rejects "gentelella/src/...".
+@use "../node_modules/gentelella/src/scss/v4/tokens";
+@use "../node_modules/gentelella/src/scss/v4/layout";
+@use "../node_modules/gentelella/src/scss/v4/components";
+@use "../node_modules/gentelella/src/scss/v4/forms";
+
+@use "dashboard";

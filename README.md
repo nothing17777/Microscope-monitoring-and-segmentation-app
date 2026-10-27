@@ -8,10 +8,16 @@ The question the dashboard exists to answer: **does the backlog grow?** If one
 machine can acquire and segment at the same time, backlog stays flat. If it
 can't, the banner at the top turns red and says `SEGMENTATION FALLING BEHIND`.
 
+It also tracks the two queues the test actually has — the microscope's
+acquisition run and this app's segmentation work — with pause, resume, cancel
+and ETAs, and is reachable from off site.
+
 - Backend: FastAPI + SQLite, single process, two background threads
   (segmenter, telemetry sampler).
-- Frontend: React + Vite + recharts on the AdminLTE 4 admin theme
-  (Bootstrap 5.3, no jQuery), one dark dashboard page.
+- Frontend: React + Vite + recharts on Gentelella v4, which is a self-contained
+  design system — its own tokens, grid and components, no Bootstrap and no
+  jQuery. Dark by default with a light mode; the choice is remembered per
+  browser and applied before first paint, so a reload never flashes.
 - Device: `cuda` if available, else `mps`, else `cpu` — shown in the UI header.
 
 ## How files are picked up
@@ -90,6 +96,119 @@ python -c "from dinov3.hub.backbones import dinov3_vitl16; print('dinov3 ok')"
 
 The cpdino weights themselves are a ~1.1 GB download on first use, cached in
 `~/.cellpose`. Pull them once before the acquisition run, not during it.
+
+## The two queues
+
+Two kinds of work, tracked separately, both in the `jobs` table.
+
+**Acquisition** moves physical hardware, so at most one acquisition job may be
+active at a time. That lock is enforced in the backend, inside one mutex, not
+in the UI: if two browsers press the button at the same moment, one gets the
+job and the other gets `409`.
+
+**Segmentation** runs concurrently with acquisition and is created
+automatically — files discovered by the scanner join the open segmentation
+job, and a new one opens once the previous has drained. Nobody queues these
+by hand.
+
+### Acquisition control is conditional
+
+Whether LumaViewPro can be driven headless is **not confirmed**. The app
+probes at startup and picks one of two adapters (`backend/acquisition.py`):
+
+| adapter | when | what it does |
+|---|---|---|
+| `ObservedAcquisition` | the default | No control at all. Progress is inferred by counting TIFFs against an expected total you type in. |
+| `ControlledAcquisition` | `--enable-acquisition-control` **and** `lumascope_api` imports and constructs | Would drive the scope. **Every hardware verb is a stub.** |
+
+The probe falls back to Observed on any doubt. The dashboard shows which mode
+is live and, in Observed mode, replaces the per-job controls with the reason
+rather than rendering a button that does nothing.
+
+#### Stubbed pending headless control
+
+These are wired end to end — API, job state, UI — but **do not touch the
+microscope**. Each is a `TODO(headless)` in `backend/acquisition.py`:
+
+- `ControlledAcquisition.start` — translating a job's plate/tiles/slices into
+  a LumaViewPro protocol and running it.
+- `.pause` / `.resume` — halting and resuming without losing stage position.
+- `.cancel` — aborting and parking the stage safely.
+
+Until those are confirmed against real hardware, start and stop the run in
+LumaViewPro itself and add it here with **Track an acquisition run** so its
+progress and ETA are followed. Everything else — segmentation queueing,
+pause/resume/cancel, ETAs, telemetry — is real in both modes.
+
+### Pause, resume, cancel
+
+- **Per-job pause** finishes the batch in flight, then stops pulling work for
+  that job. Files keep arriving and joining it, so the backlog visibly grows —
+  that is the point, and the dashboard says so.
+- **Global pause** (`POST /api/segmentation/pause`) holds the whole worker,
+  independent of any one job. It is stored in SQLite, so it survives a
+  restart; the log says so at startup.
+- **Resume** picks up every file that arrived while paused, oldest first, with
+  no gaps — pending files are ordered by discovery time, not by when the pause
+  ended.
+- **Cancel** on a running segmentation job stops after the current batch. Its
+  remaining files stay `pending`, never `failed`. They are reported separately
+  as `set_aside` and deliberately left out of `backlog`: nothing is going to
+  segment them, and counting them would keep the banner red forever.
+
+### ETAs
+
+Segmentation ETA is a **range**, built from the per-image times of up to 20
+recent batches (inter-quartile spread), not a single average. Below three
+completed batches it reports `not enough data` and shows no number at all. A
+fabricated ETA is worse than none on a dashboard someone is making decisions
+from. Confidence is `high` only with six or more batches and a spread under
+1.5x; otherwise `low`, shown as "(rough)".
+
+Acquisition ETA is the expected total over the rate observed so far, widened
+while little of the plate is in.
+
+Queued jobs also show **estimated time until they start**, accumulated from
+the upper bound of everything ahead. If any job ahead has no ETA, the ones
+behind it show none either rather than a number built on a guess.
+
+## Remote access
+
+The server binds `--host` / `--port`, default `0.0.0.0:8000`.
+
+### Auth
+
+Read-only views need no token. Every state-changing POST requires
+`X-Auth-Token` matching `MM_AUTH_TOKEN` (or `--auth-token`), compared with
+`secrets.compare_digest`. There is no user system and there should not be one
+for a lab instrument. Enter the token once in the dashboard's **Access** panel
+and the browser remembers it.
+
+If the token is unset, every POST is open and the app warns at startup and in
+the UI.
+
+### Tailscale, and a warning
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+tailscale ip -4          # e.g. 100.x.y.z
+```
+
+Then reach the dashboard at `http://100.x.y.z:8000` from any device on the
+tailnet — phone included — with no port forwarding and no open inbound port.
+
+> **Do not port-forward this machine to the public internet.** It is on the
+> same host as the microscope control software, and with acquisition control
+> enabled it can move hardware. A tailnet (or a VPN, or an SSH tunnel) keeps
+> it off the public internet entirely. If you expose it anyway, set
+> `MM_AUTH_TOKEN` first — but prefer not exposing it.
+
+### Dropped connections
+
+People close laptops. The dashboard reconnects on its own with exponential
+backoff (1s doubling to 30s), and if no update arrives for 15 seconds it says
+so in a calm banner rather than showing stale numbers as if they were live.
 
 ## Preflight
 
@@ -178,6 +297,7 @@ Start LumaViewPro and let it begin its 96-well run, then:
 
 ```bash
 source .venv/bin/activate
+export MM_AUTH_TOKEN="$(openssl rand -hex 16)"   # required for pause/cancel/queue
 python -m backend.main \
   --input-dir /data/lumaviewpro/output \
   --output-dir /data/masks \
@@ -185,6 +305,10 @@ python -m backend.main \
   --specs-path /var/lib/microscope-monitor/specs.txt \
   --port 8000
 ```
+
+Then open the dashboard, paste that token into **Access** once, and add the
+run with **Track an acquisition run** (plate name and expected image count —
+96 wells x 2x2 tiles x 20 slices x 2 channels is 15,360).
 
 Open `http://<workstation-ip>:8000` from any machine on the lab network.
 
@@ -215,6 +339,8 @@ CLI flag / env var / default:
 | `--telemetry-interval` | `MM_TELEMETRY_INTERVAL` | `2` (seconds) |
 | `--model` | `MM_MODEL` | `cpdino` |
 | `--dry-run` | `MM_DRY_RUN` | off |
+| `--auth-token` | `MM_AUTH_TOKEN` | unset (POSTs open) |
+| `--enable-acquisition-control` | `MM_ENABLE_ACQUISITION_CONTROL` | off (Observed mode) |
 
 ## API
 
@@ -226,7 +352,17 @@ CLI flag / env var / default:
 | `GET /api/specs.txt` | the same dump as plain text |
 | `GET /api/failures` | failed files with error text |
 | `GET /api/config` | resolved config, device, model |
-| `WS /ws` | a snapshot pushed every 2 s |
+| `GET /api/queue` | both queues: position, status, progress, `eta_seconds`, `eta_confidence`, adapter mode |
+| `GET /api/jobs/{id}` | one job |
+| `POST /api/jobs` | create an acquisition job (`plate`, `expected_images`, `notes`) |
+| `POST /api/jobs/{id}/pause` | pause one job |
+| `POST /api/jobs/{id}/resume` | resume one job |
+| `POST /api/jobs/{id}/cancel` | cancel one job |
+| `POST /api/segmentation/pause` | global worker pause (`{"paused": true}`) |
+| `WS /ws` | a snapshot pushed every 2 s, queue state included |
+
+The four `POST`s require `X-Auth-Token` when `MM_AUTH_TOKEN` is set; everything
+else is open.
 
 ## Specs
 

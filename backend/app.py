@@ -1,17 +1,20 @@
-"""FastAPI app: status, history, specs, failures, and a 2s WebSocket push."""
+"""FastAPI app: status, history, specs, failures, queues, and a 2s WS push."""
 import asyncio
 import contextlib
 import logging
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
-from . import specs as specs_mod
+from . import acquisition, specs as specs_mod
 from .config import Config
 from .db import Database
+from .jobs import JobError, JobManager
 from .telemetry import Sampler
 from .worker import Worker
 
@@ -20,13 +23,38 @@ log = logging.getLogger("app")
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
+class NewAcquisition(BaseModel):
+    plate: str = Field(min_length=1, max_length=120)
+    expected_images: int = Field(gt=0)
+    notes: str = Field(default="", max_length=2000)
+
+
+class GlobalPause(BaseModel):
+    paused: bool
+
+
 def create_app(cfg: Config) -> FastAPI:
     cfg.input_dir.mkdir(parents=True, exist_ok=True)
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
     db = Database(cfg.db_path)
     worker = Worker(cfg, db)
-    sampler = Sampler(cfg, db, worker)
+    adapter = acquisition.probe(cfg.input_dir, cfg.enable_acquisition_control)
+    jobs = JobManager(db, worker, adapter)
+    sampler = Sampler(cfg, db, worker, jobs)
+
+    def require_token(x_auth_token: str | None = Header(default=None)) -> None:
+        """Guard every state-changing POST. Read-only views stay open.
+
+        Compared with secrets.compare_digest so the check does not leak the
+        token's length or prefix through timing.
+        """
+        if not cfg.auth_token:
+            return
+        if not x_auth_token or not secrets.compare_digest(x_auth_token, cfg.auth_token):
+            raise HTTPException(status_code=401, detail="missing or bad X-Auth-Token")
+
+    guard = [Depends(require_token)]
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -41,6 +69,12 @@ def create_app(cfg: Config) -> FastAPI:
         sampler.start()
         log.info("device=%s model=%s input=%s output=%s",
                  worker.device, worker.model_label, cfg.input_dir, cfg.output_dir)
+        log.info("acquisition mode=%s (%s)", adapter.mode, adapter.reason)
+        if jobs.global_paused():
+            log.warning("segmentation is globally PAUSED (restored from the database)")
+        if not cfg.auth_token:
+            log.warning("MM_AUTH_TOKEN is not set — any client can pause, cancel or "
+                        "queue jobs. Set it before exposing this beyond a trusted network.")
         try:
             yield
         finally:
@@ -75,6 +109,41 @@ def create_app(cfg: Config) -> FastAPI:
     def failures():
         return {"failures": db.failures()}
 
+    # --- queues ------------------------------------------------------------
+
+    @app.get("/api/queue")
+    def get_queue():
+        return jobs.queue()
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: int):
+        job = db.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"no job #{job_id}")
+        return job
+
+    @app.post("/api/jobs", dependencies=guard, status_code=201)
+    def create_job(body: NewAcquisition):
+        try:
+            return jobs.create_acquisition(body.plate, body.expected_images, body.notes)
+        except JobError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+
+    @app.post("/api/jobs/{job_id}/{action}", dependencies=guard)
+    def job_action(job_id: int, action: str):
+        fn = {"pause": jobs.pause, "resume": jobs.resume, "cancel": jobs.cancel}.get(action)
+        if fn is None:
+            raise HTTPException(status_code=404, detail=f"unknown action {action!r}")
+        try:
+            return fn(job_id)
+        except JobError as e:
+            raise HTTPException(status_code=e.status, detail=str(e)) from e
+
+    @app.post("/api/segmentation/pause", dependencies=guard)
+    def segmentation_pause(body: GlobalPause):
+        """The whole worker, separate from any one job's pause."""
+        return {"paused": jobs.set_global_pause(body.paused)}
+
     @app.get("/api/config")
     def get_config():
         return {
@@ -88,6 +157,8 @@ def create_app(cfg: Config) -> FastAPI:
             "model": worker.model_label,
             "device": worker.device,
             "dry_run": cfg.dry_run,
+            "auth_required": bool(cfg.auth_token),
+            "acquisition": adapter.describe(),
         }
 
     @app.websocket("/ws")

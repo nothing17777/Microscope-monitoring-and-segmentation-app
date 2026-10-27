@@ -1,11 +1,20 @@
 <!doctype html>
-<html lang="en" data-bs-theme="dark">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
     <title>Microscope Monitor</title>
+    <script>
+      // Pre-paint, so a reload never flashes the wrong theme. Dark is the
+      // default: the usual viewer is a lab monitor at 11pm.
+      try {
+        var t = localStorage.getItem('mm_theme')
+        document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark')
+      } catch (e) { /* private mode */ }
+    </script>
   </head>
-  <body class="layout-fixed sidebar-expand-lg bg-body-tertiary">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

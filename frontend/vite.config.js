@@ -12,5 +12,8 @@ export default defineConfig({
       '/ws': { target: 'ws://127.0.0.1:8000', ws: true },
     },
   },
+  // Gentelella's partials @use each other by bare name, so node_modules has
+  // to be on the Sass load path.
+  css: { preprocessorOptions: { scss: { loadPaths: ['node_modules'], quietDeps: true } } },
   build: { outDir: 'dist' },
 })

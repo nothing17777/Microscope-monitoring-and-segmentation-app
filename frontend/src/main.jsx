@@ -1,10 +1,8 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
-// AdminLTE 4 ships Bootstrap 5.3 bundled into adminlte.css, so this is the
-// only stylesheet needed. The ESM build drives the sidebar toggle.
-import 'admin-lte/dist/css/adminlte.min.css'
-import 'admin-lte/dist/js/adminlte.esm.min.js'
+// Gentelella v4 is the whole design system — tokens, layout and components,
+// with no Bootstrap and no jQuery. theme.scss pulls in the partials used here.
+import './theme.scss'
 import App from './App.jsx'
-import './styles.css'
 
 createRoot(document.getElementById('root')).render(<App />)

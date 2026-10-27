@@ -1,0 +1,203 @@
+// Dashboard-specific styling. Everything structural comes from Gentelella's
+// tokens and layout; this file only adds what a wall display needs: one
+// dominant verdict, numbers that do not jitter, and a phone layout.
+
+// Every number uses tabular figures so digits keep their column as they tick.
+body { font-variant-numeric: tabular-nums; }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+// Numbers ease rather than snap. 200ms, and only on the value itself.
+.metric-value { transition: color 200ms ease; }
+
+// --- state colours ----------------------------------------------------------
+// Colour means exactly one thing here: how the run is going. Nothing is
+// tinted for decoration, and every state is also distinguished by its words,
+// so the whole page survives being read in grayscale.
+.state-ok      { --state: var(--primary); --state-lt: var(--primary-lt); }
+.state-warn    { --state: var(--yellow);  --state-lt: var(--yellow-lt); }
+.state-bad     { --state: var(--red);     --state-lt: var(--red-lt); }
+.state-idle    { --state: var(--text-muted); --state-lt: var(--bg-surface-secondary); }
+
+// --- the verdict ------------------------------------------------------------
+// The one thing that dominates. Sized to read from across the room.
+.verdict {
+  border: 1px solid var(--border-color);
+  border-left: 4px solid var(--state);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1fr);
+}
+.verdict-headline {
+  font-size: clamp(28px, 4.4vw, 56px);
+  font-weight: var(--font-weight-bold);
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  color: var(--state);
+}
+.verdict-sub { color: var(--text-secondary); max-width: 62ch; }
+.verdict-figure { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; }
+.verdict-number {
+  font-family: var(--font-mono);
+  font-size: clamp(56px, 11vw, 132px);
+  font-weight: var(--font-weight-bold);
+  line-height: 0.95;
+  letter-spacing: -0.03em;
+}
+.verdict-unit { font-size: var(--font-size); color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; }
+
+// The only animation that draws the eye: entering a warning state. One pass,
+// then still. A dashboard that moves constantly is exhausting to sit beside.
+@keyframes state-enter {
+  from { background: var(--state-lt); }
+  to   { background: var(--bg-surface); }
+}
+.verdict.just-changed { animation: state-enter 1200ms ease-out 1; }
+@media (prefers-reduced-motion: reduce) {
+  .verdict.just-changed { animation: none; }
+  .metric-value { transition: none; }
+}
+
+// --- metric tiles -----------------------------------------------------------
+.metric {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  display: flex; flex-direction: column; gap: var(--space-1);
+  min-width: 0;
+}
+.metric-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-muted); font-weight: var(--font-weight-medium);
+}
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: clamp(26px, 3.4vw, 38px);
+  font-weight: var(--font-weight-bold);
+  line-height: 1.1;
+  color: var(--text);
+}
+.metric-value .unit { font-size: 0.45em; color: var(--text-muted); margin-left: 4px; font-family: var(--font); }
+.metric-sub { font-size: 12px; color: var(--text-secondary); min-height: 1.2em; }
+.metric.is-state .metric-value { color: var(--state); }
+
+// --- queue ------------------------------------------------------------------
+// Rows, not cards. The running job is the only one with any weight.
+.queue-lane { display: flex; flex-direction: column; }
+.queue-empty {
+  padding: var(--space-5) var(--space-4);
+  color: var(--text-muted);
+  text-align: center;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius);
+  margin: var(--space-4);
+}
+.queue-empty strong { display: block; color: var(--text-secondary); margin-bottom: 4px; }
+
+.job {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-color-light);
+}
+.job:first-child { border-top: 0; }
+.job-running { background: var(--bg-surface-secondary); }
+.job-pos {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+.job-running .job-pos { color: var(--state); }
+.job-main { min-width: 0; }
+.job-title { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.job-name { font-weight: var(--font-weight-medium); }
+.job-running .job-name { font-weight: var(--font-weight-bold); }
+.job-note { font-size: 12px; color: var(--text-muted); }
+.job-meta {
+  display: flex; gap: var(--space-3); flex-wrap: wrap;
+  font-size: 12px; color: var(--text-secondary); margin-top: 2px;
+}
+
+.job-bar {
+  height: 4px; border-radius: 2px; background: var(--border-color);
+  margin-top: var(--space-2); overflow: hidden;
+}
+.job-bar span { display: block; height: 100%; background: var(--state); transition: width 200ms ease; }
+
+// Controls stay quiet until the row is hovered or focused, so they never
+// compete with the metrics.
+.job-actions { display: flex; gap: 4px; opacity: 0.25; transition: opacity 150ms ease; }
+.job:hover .job-actions,
+.job:focus-within .job-actions { opacity: 1; }
+@media (hover: none) { .job-actions { opacity: 1; } }
+.job-actions .btn { padding: 4px 8px; font-size: 12px; }
+
+.status-chip {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 1px 6px; border-radius: var(--radius-sm);
+  background: var(--state-lt); color: var(--state);
+  border: 1px solid var(--state);
+}
+
+// --- banners ----------------------------------------------------------------
+// A dropped socket is normal (laptops close). Calm, not alarming.
+.notice {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--state);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  margin-bottom: var(--space-4);
+}
+.notice strong { color: var(--text); font-weight: var(--font-weight-medium); }
+
+// --- charts -----------------------------------------------------------------
+.chart-box { height: 260px; }
+.chart-box-hero { height: 340px; }
+.chart-note { font-size: 12px; color: var(--text-muted); }
+
+// Gentelella's .theme-toggle rules already pick which of the two icons is
+// shown; this only sizes it and sets it beside the label.
+.theme-toggle { display: inline-flex; align-items: center; gap: 6px; }
+.theme-toggle svg { width: 15px; height: 15px; flex: none; }
+
+// --- misc -------------------------------------------------------------------
+.spec-dump {
+  max-height: 420px; overflow: auto; margin: 0;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.5; white-space: pre;
+  color: var(--text-secondary);
+}
+.table-failures td.error {
+  font-family: var(--font-mono); font-size: 12px; word-break: break-word;
+  color: var(--text-secondary);
+}
+.muted { color: var(--text-muted); }
+.stack { display: flex; flex-direction: column; gap: var(--space-4); }
+.inline-form { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: flex-end; }
+.inline-form .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.inline-form label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+.inline-form input {
+  background: var(--bg-surface-secondary); color: var(--text);
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+  padding: 6px 8px; font: inherit; min-width: 0;
+}
+.form-error { color: var(--red); font-size: 12px; }
+
+// --- phone ------------------------------------------------------------------
+// The point of remote access is a glance at midnight, so the verdict, rate,
+// backlog and ETA stack and stay readable without zooming.
+@media (max-width: 600px) {
+  .verdict { padding: var(--space-4); }
+  .chart-box, .chart-box-hero { height: 150px; }  // charts collapse to sparklines
+  .job { grid-template-columns: 1.75rem minmax(0, 1fr); }
+  .job-actions { grid-column: 2; justify-content: flex-start; margin-top: var(--space-2); }
+  .inline-form .field { flex: 1 1 100%; }
+}

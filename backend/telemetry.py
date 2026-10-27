@@ -57,10 +57,11 @@ def sample_gpu() -> dict[str, Any] | None:
 
 
 class Sampler:
-    def __init__(self, cfg: Config, db: Database, worker: Worker):
+    def __init__(self, cfg: Config, db: Database, worker: Worker, jobs=None):
         self.cfg = cfg
         self.db = db
         self.worker = worker
+        self.jobs = jobs
         self.started_at = time.time()
         self.latest: dict[str, Any] = {}
         self._stop = threading.Event()
@@ -152,6 +153,14 @@ class Sampler:
             "gpu": sample_gpu(),
             "worker": wk,
         }
+        if self.jobs is not None:
+            # The queue rides along with telemetry so the dashboard gets both
+            # from one WebSocket frame and cannot show them out of step.
+            snap["queue"] = self.jobs.queue()
+            snap.update({k: v for k, v in self.jobs.segmentation_eta(counts["backlog"]).items()
+                         if k != "eta_seconds"})
         self.latest = snap
-        self.db.add_sample(now, snap)
+        # The queue is live state, not history; storing it would bloat every
+        # telemetry row and it is never read back from there.
+        self.db.add_sample(now, {k: v for k, v in snap.items() if k != "queue"})
         return snap

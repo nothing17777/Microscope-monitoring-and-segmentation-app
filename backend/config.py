@@ -19,6 +19,8 @@ class Config:
     model_name: str
     dry_run: bool
     specs_path: Path
+    auth_token: str | None
+    enable_acquisition_control: bool
 
 
 def _env(name: str, default: str) -> str:
@@ -45,6 +47,18 @@ def load_config(argv: list[str] | None = None) -> Config:
     p.add_argument("--model", default=_env("MM_MODEL", "cpdino"))
     p.add_argument("--specs-path", default=_env("MM_SPECS_PATH", "./specs.txt"))
     p.add_argument(
+        "--auth-token", default=os.environ.get("MM_AUTH_TOKEN") or None,
+        help="Shared token required for state-changing POSTs. Read-only views "
+             "never need it. Unset means every POST is open — fine on a "
+             "tailnet you trust, not on a shared network.",
+    )
+    p.add_argument(
+        "--enable-acquisition-control", action="store_true",
+        default=_env("MM_ENABLE_ACQUISITION_CONTROL", "0") not in ("0", "", "false", "False"),
+        help="Try to drive LumaViewPro through lumascope_api. The hardware "
+             "verbs are stubs; without this flag the app only watches files.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         default=_env("MM_DRY_RUN", "0") not in ("0", "", "false", "False"),
@@ -65,4 +79,6 @@ def load_config(argv: list[str] | None = None) -> Config:
         model_name=a.model,
         dry_run=a.dry_run,
         specs_path=Path(a.specs_path).expanduser().resolve(),
+        auth_token=a.auth_token,
+        enable_acquisition_control=a.enable_acquisition_control,
     )

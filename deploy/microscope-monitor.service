@@ -23,6 +23,14 @@ Environment=MM_SPECS_PATH=/var/lib/microscope-monitor/specs.txt
 Environment=MM_PORT=8000
 Environment=MM_BATCH_SIZE=16
 Environment=MM_MODEL=cpdino
+# Token for state-changing POSTs (pause, cancel, queue a run). Read-only views
+# never need it. Keep it out of this file on a shared box: drop it in
+# /etc/microscope-monitor.env (chmod 600) and uncomment EnvironmentFile below.
+Environment=MM_AUTH_TOKEN=change-me
+#EnvironmentFile=-/etc/microscope-monitor.env
+# Acquisition control is OFF: the lumascope_api verbs are still stubs. Turn it
+# on only once headless control is confirmed against the microscope.
+Environment=MM_ENABLE_ACQUISITION_CONTROL=0
 # Cellpose model cache; keep it on a path the service user owns.
 Environment=CELLPOSE_LOCAL_MODELS_PATH=/var/lib/microscope-monitor/cellpose
 # Refuse to start if the GPU stack or the input dir is not ready.
