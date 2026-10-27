@@ -26,10 +26,14 @@ export function toSeries(samples) {
     cpu: d.cpu_pct,
     ram: d.ram_pct,
     gpu: d.gpu?.gpu_util_pct ?? null,
+    interMean: d.inter_arrival_mean_s ?? null,
+    interP95: d.inter_arrival_p95_s ?? null,
+    diskRead: d.disk_read_mbs ?? null,
+    diskWrite: d.disk_write_mbs ?? null,
   }))
 }
 
-export default function Chart({ data, lines, hero, yLabel }) {
+export default function Chart({ data, lines, hero, yLabel, allowDecimals }) {
   const grid = token('--border-color', '#333')
   const muted = token('--text-muted', '#888')
   const surface = token('--bg-surface', '#1a2332')
@@ -48,7 +52,7 @@ export default function Chart({ data, lines, hero, yLabel }) {
           )}
           {spark ? null : (
             <YAxis tick={{ fill: muted, fontSize: 11 }} stroke={grid} tickLine={false}
-                   width={46} allowDecimals={false}
+                   width={46} allowDecimals={allowDecimals ?? false}
                    label={yLabel ? { value: yLabel, angle: -90, position: 'insideLeft',
                                      fill: muted, fontSize: 11 } : undefined} />
           )}

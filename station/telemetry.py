@@ -8,7 +8,8 @@ from typing import Any
 
 import psutil
 
-from backend.telemetry import RATE_WINDOW_S, TREND_WINDOW_S, sample_gpu
+from backend.experiment import UNLABELED
+from backend.telemetry import RATE_WINDOW_S, TREND_WINDOW_S, DiskIO, sample_gpu
 
 from .config import Config
 from .db import Database
@@ -28,6 +29,7 @@ class Sampler:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_status: dict[int, str] = {}
+        self.disk_io = DiskIO(cfg.input_dir if cfg.input_dir.exists() else cfg.input_dir.parent)
         psutil.cpu_percent(interval=None)
 
     def start(self) -> None:
@@ -85,10 +87,18 @@ class Sampler:
 
         vm = psutil.virtual_memory()
         trend, rising = self._backlog_trend()
+        # The phase and batch size in force come from the worker snapshot, so
+        # a sample can never claim a phase the worker was not actually in.
+        arrivals = wk.get("arrivals") or {}
 
         snap: dict[str, Any] = {
             "ts": now,
             "elapsed_s": now - self.started_at,
+            "phase": wk.get("phase", UNLABELED),
+            "batch_size": wk.get("batch_size"),
+            "inter_arrival_mean_s": arrivals.get("mean_s"),
+            "inter_arrival_p95_s": arrivals.get("p95_s"),
+            "inter_arrival_n": arrivals.get("n", 0),
             **counts,
             "current_rate": current_rate,
             "avg_rate": avg_rate,
@@ -99,6 +109,7 @@ class Sampler:
             "ram_total_bytes": vm.total,
             "ram_pct": vm.percent,
             **disk,
+            **self.disk_io.sample(),
             "gpu": sample_gpu(),
             "worker": wk,
             "run_id": run["id"] if run else None,

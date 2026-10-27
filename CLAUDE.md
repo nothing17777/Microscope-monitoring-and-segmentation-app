@@ -15,6 +15,8 @@ LumaViewPro itself is never modified — these apps only read its output.
   history with chart replay, and webhook alerts. Separate DB, separate frontend.
 - `preflight.py` — fresh-workstation checks (GPU kernels, dinov3, dirs, port, throughput).
 - `fake_producer.py` — synthetic acquisition for local testing.
+- `sweep.py` — cycles batch sizes and sets phase labels on a timer against a
+  running station, so a capacity sweep runs hands-off.
 
 The two apps must **never share an `--input-dir`**: each runs its own Cellpose worker and
 they would both segment the same TIFFs.
@@ -22,6 +24,11 @@ they would both segment the same TIFFs.
 ## Commands
 
 ```bash
+# capacity study (station must be running)
+python sweep.py --sizes 1,2,4,8,16 --hold 10m --prefix solo_sweep
+python sweep.py --sizes 1,2,4,8 --dry-run      # print the plan, change nothing
+curl -s localhost:8100/api/report.md           # per-phase report, tuning table
+
 # dashboard
 python -m backend.main --input-dir ./data/input --output-dir ./data/masks \
   --db-path ./data/monitor.sqlite --port 8000 [--dry-run]
@@ -33,7 +40,7 @@ python -m station.main --input-dir ./data/station/input --db-path ./data/station
 cd station/frontend && npm run dev            # :5174, proxies to :8100
 
 # tests — there is no pytest; the only test suite is:
-python -m station.selftest                    # alerts, acquisition lock, ETAs
+python -m station.selftest                    # alerts, lock, ETAs, phases, batch size, report
 # single test: edit main() in station/selftest.py, or call e.g.
 python -c "import tempfile,pathlib,station.selftest as s; s.test_eta(pathlib.Path(tempfile.mkdtemp()))"
 
@@ -60,9 +67,28 @@ state, telemetry, the global pause flag — survives a restart and the worker re
 every 2 s; `GET /api/status` returns the same object.
 
 **`StationWorker` subclasses `backend.worker.Worker`.** `scan()` is inherited verbatim —
-the partial-file guard and backlog accounting live there and must not be copied into the
-station. Only run-aware hooks (`_job_for_new_files`, `segment_one_batch`, `_globally_paused`,
-`snapshot`) are overridden. Fix that logic once and both apps get it.
+the partial-file guard, backlog accounting and the inter-arrival metric live there and must
+not be copied into the station. Only run-aware hooks (`_job_for_new_files`,
+`segment_one_batch`, `_globally_paused`, `snapshot`) are overridden. Fix that logic once and
+both apps get it.
+
+### Experiment instrumentation
+
+For the capacity/tuning study. Deliberately split so the dashboard inherits everything that
+is not run-specific:
+
+- `backend/worker.py` — inter-arrival tracking in `scan()` (file **mtimes**, not discovery
+  times: discovery is quantised to the poll interval and would measure the scanner, not the
+  microscope), `set_batch_size()` (live, effective next batch), `phase()`, and
+  `_record_batch()`, which both workers call instead of appending to `_batch_times` so the
+  ETA timing and the recorded batch size/phase cannot disagree.
+- `backend/telemetry.py` — `DiskIO`, read **and** write MB/s for the input volume (the block
+  device via `/sys/dev/block` on Linux, system-wide elsewhere). Write bytes alone cannot tell
+  disk contention from GPU contention.
+- `backend/experiment.py` — the phase store (`kv`), per-phase aggregation, the tuning table,
+  the contention headline, and the markdown rendering. Pure functions over sample dicts.
+- `station/` — the only place with endpoints: `POST /api/phase`, `POST /api/config/batch-size`,
+  `GET /api/report`, `GET /api/report.md`, the `batches` table, and the Experiment page.
 
 ### Invariants that look like bugs if you don't know them
 
@@ -75,6 +101,14 @@ station. Only run-aware hooks (`_job_for_new_files`, `segment_one_batch`, `_glob
 - **ETAs are ranges or nothing.** Under three completed batches the API reports
   `not enough data` and the UI shows no number. A fabricated ETA is worse than none here.
   Queued items show no start estimate if anything ahead of them has none.
+- **The same rule governs the study report.** A phase under
+  `experiment.MIN_SAMPLES` (20) reports `not enough data` and *no numbers at all*, not
+  numbers with a caveat. Inter-arrival needs three gaps. The contention headline is absent
+  unless both a `*solo*` and a `*concurrent*` phase qualify, and it is compared at a batch
+  size both of them ran — otherwise it measures the batch size, not the contention.
+- **The phase label defaults to `unlabeled`** and the UI says so on a persistent banner.
+  An unlabelled stretch of a study cannot be attributed afterwards and the acquisition does
+  not come back.
 - **Acquisition control is stubbed.** Every hardware verb in `backend/acquisition.py` and
   `station/acquisition.py` is a `TODO(headless)`; `probe()` falls back to `ObservedAcquisition`
   on any doubt, and in Observed mode the UI omits the controls (not disables them) and the

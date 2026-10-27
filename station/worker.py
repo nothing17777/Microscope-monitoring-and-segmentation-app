@@ -146,7 +146,7 @@ class StationWorker(BaseWorker):
         masks = self._run_model(images)
         if masks is None:
             return False
-        self._batch_times.append((time.time() - t0) / max(1, len(kept)))
+        self._record_batch(len(kept), time.time() - t0)
 
         for path, mask in zip(kept, masks):
             try:

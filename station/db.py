@@ -5,6 +5,9 @@ Tables:
   images    - every discovered TIFF, owned by a run, tagged with its well
   telemetry - one row per sampler tick, tagged with the run it belongs to,
               so a finished run's charts can be replayed months later
+  batches   - one row per segmented batch, with the batch size and phase in
+              force, so the tuning table is built from what actually ran
+              rather than from telemetry sampled near it
   events    - what was alerted on, and when (the webhook debounce lives here)
   kv        - small persisted flags, e.g. the global segmentation pause
 
@@ -59,6 +62,19 @@ CREATE TABLE IF NOT EXISTS telemetry (
     data   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS telemetry_run ON telemetry(run_id, ts);
+
+CREATE TABLE IF NOT EXISTS batches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    run_id      INTEGER,
+    phase       TEXT NOT NULL,
+    batch_size  INTEGER NOT NULL,
+    n_images    INTEGER NOT NULL,
+    seconds     REAL NOT NULL,
+    per_image_s REAL NOT NULL,
+    device      TEXT
+);
+CREATE INDEX IF NOT EXISTS batches_phase ON batches(phase, ts);
 
 CREATE TABLE IF NOT EXISTS events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,10 +274,50 @@ class Database:
                 self._q("SELECT data FROM telemetry WHERE ts >= ? ORDER BY ts",
                         (time.time() - minutes * 60,))]
 
+    def all_samples(self, since: float | None = None,
+                    run_id: int | None = None) -> list[dict[str, Any]]:
+        """Every stored sample, for the report. Oldest first."""
+        sql, args = "SELECT data FROM telemetry", []
+        where = []
+        if since is not None:
+            where.append("ts >= ?")
+            args.append(since)
+        if run_id is not None:
+            where.append("run_id = ?")
+            args.append(run_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return [json.loads(r["data"]) for r in self._q(sql + " ORDER BY ts", tuple(args))]
+
     def run_history(self, run_id: int) -> list[dict[str, Any]]:
         """Every sample recorded for one run — the replay source."""
         return [json.loads(r["data"]) for r in
                 self._q("SELECT data FROM telemetry WHERE run_id=? ORDER BY ts", (run_id,))]
+
+    # --- batches -----------------------------------------------------------
+
+    def add_batch(self, ts: float, run_id: int | None, phase: str, batch_size: int,
+                  n_images: int, seconds: float, per_image_s: float,
+                  device: str | None = None) -> None:
+        self._x("INSERT INTO batches(ts, run_id, phase, batch_size, n_images, seconds, "
+                "per_image_s, device) VALUES (?,?,?,?,?,?,?,?)",
+                (ts, run_id, phase, batch_size, n_images, seconds, per_image_s, device))
+
+    def batches(self, since: float | None = None, limit: int = 10000) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM batches", []
+        if since is not None:
+            sql += " WHERE ts >= ?"
+            args.append(since)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        args.append(limit)
+        return [dict(r) for r in self._q(sql, tuple(args))]
+
+    def batch_stats_by_phase(self) -> list[dict[str, Any]]:
+        """Images per second measured from the batches themselves."""
+        return [dict(r) for r in self._q(
+            "SELECT phase, batch_size, COUNT(*) batches, SUM(n_images) images, "
+            "SUM(seconds) seconds, MIN(ts) first_ts, MAX(ts) last_ts "
+            "FROM batches GROUP BY phase, batch_size ORDER BY first_ts")]
 
     # --- events ------------------------------------------------------------
 

@@ -121,6 +121,17 @@ As a service: `deploy/microscope-station.service`, the same way as this one.
 Station's worker subclasses this one, so the partial-file guard and backlog
 accounting are inherited rather than copied and cannot drift.
 
+The capacity-study instrumentation is driven from Station, but the parts that
+belong to the worker live here and this dashboard gets them too: the
+**inter-arrival metric** in `Worker.scan()`, the **phase label** and the
+**batch-size/phase recording** in `Worker._record_batch()`, and the **disk
+read/write throughput** in `backend/telemetry.py`. The phase store, the
+per-phase report and its markdown are in `backend/experiment.py`. The
+dashboard's samples carry `phase`, `inter_arrival_mean_s`,
+`inter_arrival_p95_s`, `disk_read_mbs` and `disk_write_mbs`; the endpoints
+that set a phase, change the batch size and render the report are Station's
+only — see `station/README.md`, "Capacity and tuning study".
+
 ## The two queues
 
 Two kinds of work, tracked separately, both in the `jobs` table.
@@ -370,7 +381,7 @@ CLI flag / env var / default:
 
 | endpoint | returns |
 |---|---|
-| `GET /api/status` | current snapshot (counts, rates, ETA, GPU/CPU/RAM/disk, worker state) |
+| `GET /api/status` | current snapshot (counts, rates, ETA, GPU/CPU/RAM/disk read+write, inter-arrival, phase, worker state) |
 | `GET /api/history?minutes=30` | time series of those snapshots, for the charts |
 | `GET /api/specs` | machine spec dump as JSON + rendered text |
 | `GET /api/specs.txt` | the same dump as plain text |

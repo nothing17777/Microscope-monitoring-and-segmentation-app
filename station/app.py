@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+import time
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from backend import specs as specs_mod
+from backend import experiment, specs as specs_mod
 
 from . import acquisition
 from .config import Config
@@ -39,6 +40,16 @@ class NewRun(BaseModel):
 
 class PauseBody(BaseModel):
     paused: bool
+
+
+class PhaseBody(BaseModel):
+    # Free text: the phase names are the experimenter's, not an enum we can
+    # predict. Normalised to a slug on the way in.
+    name: str = Field(min_length=1, max_length=64)
+
+
+class BatchSizeBody(BaseModel):
+    n: int = Field(ge=1, le=256)
 
 
 def create_app(cfg: Config) -> FastAPI:
@@ -149,7 +160,37 @@ def create_app(cfg: Config) -> FastAPI:
             "acquisition": adapter.describe(),
             "webhook_configured": notifier.enabled,
             "plate": {"rows": cfg.plate_rows, "cols": cfg.plate_cols},
+            "phase": experiment.get_phase(db),
+            "batch_size_effective": worker.batch_size,
         }
+
+    @app.get("/api/phase")
+    def get_phase():
+        return {"phase": experiment.get_phase(db), "default": experiment.UNLABELED}
+
+    @app.get("/api/report")
+    def report(minutes: float | None = None, run_id: int | None = None):
+        since = None if minutes is None else (time.time() - minutes * 60)
+        return _report(since, run_id)
+
+    @app.get("/api/report.md", response_class=PlainTextResponse)
+    def report_md(minutes: float | None = None, run_id: int | None = None):
+        since = None if minutes is None else (time.time() - minutes * 60)
+        return experiment.to_markdown(_report(since, run_id))
+
+    def _report(since: float | None, run_id: int | None) -> dict:
+        return experiment.build_report(
+            db.all_samples(since=since, run_id=run_id),
+            meta={
+                "input_dir": str(cfg.input_dir),
+                "device": worker.device,
+                "model": worker.model_label,
+                "dry_run": cfg.dry_run,
+                "current_phase": experiment.get_phase(db),
+                # Measured straight off the batch rows, independent of the
+                # telemetry sampling: a cross-check on the per-phase table.
+                "measured_batches": db.batch_stats_by_phase(),
+            })
 
     # --- state-changing ----------------------------------------------------
 
@@ -180,6 +221,19 @@ def create_app(cfg: Config) -> FastAPI:
     @app.post("/api/segmentation/pause", dependencies=guard)
     def global_pause(body: PauseBody):
         return {"paused": runs.set_global_pause(body.paused)}
+
+    @app.post("/api/phase", dependencies=guard)
+    def set_phase(body: PhaseBody):
+        """Label everything sampled from now on. Takes effect on the next sample."""
+        phase = experiment.set_phase(db, body.name)
+        log.info("experiment phase -> %s", phase)
+        return {"phase": phase}
+
+    @app.post("/api/config/batch-size", dependencies=guard)
+    def set_batch_size(body: BatchSizeBody):
+        """Change the segmentation batch size live, effective on the next batch."""
+        n = worker.set_batch_size(body.n)
+        return {"batch_size": n, "note": "effective on the next batch"}
 
     @app.post("/api/notify/test", dependencies=guard)
     def notify_test():

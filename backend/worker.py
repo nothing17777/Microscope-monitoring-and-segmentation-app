@@ -25,10 +25,17 @@ import numpy as np
 from .config import Config
 from .db import Database
 from .device import pick_device
+from .experiment import PHASE_KEY, UNLABELED
 
 log = logging.getLogger("worker")
 
 TIFF_SUFFIXES = {".tif", ".tiff"}
+
+# Window for the rolling inter-arrival statistics, and how many arrivals to
+# keep. Ten minutes is long enough to survive a well change and short enough
+# that a phase switch shows up inside one phase.
+ARRIVAL_WINDOW_S = 600.0
+ARRIVAL_MAX = 2000
 
 
 def _is_tiff(p: Path) -> bool:
@@ -76,6 +83,12 @@ class Worker:
         # Per-image seconds for recent batches; the ETA range is built from
         # their spread rather than from a single running average.
         self._batch_times: deque[float] = deque(maxlen=20)
+        # Acquisition arrival times, for the inter-arrival metric. These are
+        # file mtimes, not discovery times: LumaViewPro's own write timestamp
+        # is the only thing here with better resolution than the poll
+        # interval, and poll-quantised arrivals would show the scanner's
+        # cadence rather than the microscope's.
+        self._arrivals: deque[float] = deque(maxlen=ARRIVAL_MAX)
         self._cancelled: set[int] = set()
         self.current_job_id: int | None = None
         self.paused_reason: str | None = None
@@ -86,6 +99,67 @@ class Worker:
 
     def recent_per_image_seconds(self) -> list[float]:
         return list(self._batch_times)
+
+    def set_batch_size(self, n: int) -> int:
+        """Change the batch size for the next batch. No restart, no drain.
+
+        The batch in flight finishes at the size it started with; segment_one_batch
+        reads this at the top of each batch.
+        """
+        n = max(1, min(256, int(n)))
+        if n != self.batch_size:
+            log.info("batch size %d -> %d (effective next batch)", self.batch_size, n)
+        self.batch_size = n
+        return n
+
+    def phase(self) -> str:
+        """The experiment phase label in force, from the database."""
+        try:
+            return str(self.db.kv_get(PHASE_KEY, UNLABELED)) or UNLABELED
+        except Exception:  # noqa: BLE001
+            return UNLABELED
+
+    def arrival_stats(self, window_s: float = ARRIVAL_WINDOW_S) -> dict[str, Any]:
+        """Rolling mean and p95 of the gap between consecutive arrivals.
+
+        This is how a slowdown in LumaViewPro is detected: it reports nothing
+        about itself, but if segmentation starts stealing disk or CPU from
+        acquisition the gap between images widens. Fewer than three gaps in
+        the window is not a measurement, so it reports nothing.
+        """
+        cutoff = time.time() - window_s
+        ts = sorted(t for t in self._arrivals if t >= cutoff)
+        gaps = [b - a for a, b in zip(ts, ts[1:]) if b >= a]
+        if len(gaps) < 3:
+            return {"mean_s": None, "p95_s": None, "n": len(gaps),
+                    "note": "not enough data"}
+        gaps.sort()
+        i = min(len(gaps) - 1, max(0, int(round(0.95 * (len(gaps) - 1)))))
+        return {"mean_s": sum(gaps) / len(gaps), "p95_s": gaps[i], "n": len(gaps),
+                "note": ""}
+
+    def _record_arrival(self, mtime: float) -> None:
+        self._arrivals.append(mtime)
+
+    def _record_batch(self, n_images: int, seconds: float) -> None:
+        """Per-image timing for the ETA, plus one durable row for the report.
+
+        Both workers call this instead of appending to _batch_times, so the
+        batch size and phase in force are recorded with the timing in one
+        place and cannot disagree between the two apps.
+        """
+        per_image = seconds / max(1, n_images)
+        self._batch_times.append(per_image)
+        add = getattr(self.db, "add_batch", None)
+        if add is None:
+            return  # the dashboard DB has no batches table; timing-only is fine
+        try:
+            run_id = getattr(self, "current_run_id", None) or self.current_job_id
+            add(ts=time.time(), run_id=run_id, phase=self.phase(),
+                batch_size=self.batch_size, n_images=n_images, seconds=seconds,
+                per_image_s=per_image, device=self.device)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to record batch row")
 
     def request_cancel(self, job_id: int) -> None:
         """Stop pulling work for this job after the current batch finishes."""
@@ -181,6 +255,7 @@ class Worker:
         """Record sizes; enqueue files whose size is unchanged since last poll."""
         root = self.cfg.input_dir
         sizes: dict[str, int] = {}
+        mtimes: dict[str, float] = {}
         total_bytes = 0
         if root.exists():
             for p in root.rglob("*"):
@@ -193,6 +268,7 @@ class Worker:
                 if not p.is_file():
                     continue
                 sizes[str(p)] = st.st_size
+                mtimes[str(p)] = st.st_mtime
                 total_bytes += st.st_size
         now = time.time()
         self.input_bytes = total_bytes
@@ -229,6 +305,9 @@ class Worker:
                     self.db.add_pending(path, size, None, None, job_id=job_id)
                     self.db.mark_failed(path, f"unreadable after {n} attempts: {e!r}")
                     self.db.bump_job(job_id, failed=1, total=1)
+                    # It still arrived; acquisition cadence does not care that
+                    # we could not read it.
+                    self._record_arrival(mtimes.get(path, now))
                     log.warning("unreadable TIFF %s: %r", path, e)
                 else:
                     seen[path] = (size, now)  # restart the stability clock
@@ -238,6 +317,7 @@ class Worker:
             if job_id is None:
                 job_id = self._job_for_new_files()
             self.db.add_pending(path, size, w, h, job_id=job_id)
+            self._record_arrival(mtimes.get(path, now))
             enqueued += 1
         self._seen = seen
         if enqueued and job_id is not None:
@@ -310,7 +390,7 @@ class Worker:
             # don't spin on them.
             return False
 
-        self._batch_times.append((time.time() - t0) / max(1, len(kept)))
+        self._record_batch(len(kept), time.time() - t0)
 
         ok = failed = 0
         for path, mask in zip(kept, masks):
@@ -400,4 +480,6 @@ class Worker:
             "current_job_id": self.current_job_id,
             "paused_reason": self.paused_reason,
             "batches_timed": len(self._batch_times),
+            "phase": self.phase(),
+            "arrivals": self.arrival_stats(),
         }

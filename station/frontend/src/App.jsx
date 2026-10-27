@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Chart, { stateColor, toSeries, token } from './Charts'
+import { PhaseBar, PhaseTable } from './Experiment'
 import Plate from './Plate'
 import Queue from './Queue'
 import RunDetail from './RunDetail'
@@ -19,6 +20,7 @@ function useRoute() {
   const m = /^#\/runs\/(\d+)/.exec(hash)
   if (m) return { page: 'run', runId: Number(m[1]) }
   if (hash.startsWith('#/runs')) return { page: 'runs' }
+  if (hash.startsWith('#/experiment')) return { page: 'experiment' }
   return { page: 'dashboard' }
 }
 
@@ -280,6 +282,7 @@ function TokenBox({ required }) {
 const NAV = [
   ['#/', 'Dashboard'],
   ['#/runs', 'Run history'],
+  ['#/experiment', 'Experiment'],
 ]
 
 export default function App() {
@@ -294,6 +297,7 @@ export default function App() {
   const history = usePoll('/api/history?minutes=30', 10000)
   const runsList = usePoll(`/api/runs?limit=100&n=${nonce}`, 15000)
   const events = usePoll(`/api/events?n=${nonce}`, 20000)
+  const report = usePoll(`/api/report?n=${nonce}`, 30000)
   const queue = snap?.queue
   const activeRun = queue?.acquisition?.[0] ?? null
   const plate = usePoll(activeRun ? `/api/runs/${activeRun.id}/plate` : null, 5000)
@@ -302,9 +306,24 @@ export default function App() {
   useEffect(() => { force((n) => n + 1) }, [theme])
 
   const series = useMemo(() => toSeries(history?.samples), [history])
+  // The phase comes off the live snapshot, not /api/config: it is what the
+  // worker is tagging samples with right now, which is the thing that matters.
+  const phase = snap?.phase ?? snap?.worker?.phase
+  const batchSize = snap?.worker?.batch_size
+  const knownPhases = (report?.phases ?? []).map((p) => p.phase)
   const seg = segState(snap)
   const acq = acqState(activeRun, queue?.adapter)
   const changed = () => { refresh(); setNonce((n) => n + 1) }
+
+  // Shown until a label is set: an unlabelled stretch of the study cannot be
+  // attributed afterwards, and that is not recoverable once the day is over.
+  const unlabeledBanner = (!phase || phase === 'unlabeled') ? (
+    <div className="notice state-warn">
+      <strong>No phase label.</strong> Samples are being recorded as
+      {' '}<code>unlabeled</code> and will not appear as a phase in the report.
+      <a className="btn btn-ghost btn-sm" href="#/experiment">Set a phase</a>
+    </div>
+  ) : null
 
   const sendTest = async () => {
     setBusy(true)
@@ -346,10 +365,15 @@ export default function App() {
           <button className="sidebar-toggle" onClick={() => setNavOpen((o) => !o)}
                   aria-label="Toggle navigation">☰</button>
           <nav className="breadcrumb"><span className="current">
-            {route.page === 'dashboard' ? `${acq.headline} · ${seg.headline}` : 'Run history'}
+            {route.page === 'dashboard' ? `${acq.headline} · ${seg.headline}`
+              : route.page === 'experiment' ? 'Experiment' : 'Run history'}
           </span></nav>
         </div>
         <div className="topbar-right">
+          <a className={`phase-pill ${phase && phase !== 'unlabeled' ? '' : 'is-unset'}`}
+             href="#/experiment" title="Experiment phase — every sample is tagged with this">
+            {phase ?? '—'}{batchSize ? ` · bs${batchSize}` : ''}
+          </a>
           <span className="muted" style={{ fontSize: 12 }}>{connected ? 'live' : 'reconnecting'}</span>
           <button className="btn btn-ghost btn-sm theme-toggle" onClick={toggleTheme}
                   aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
@@ -371,6 +395,19 @@ export default function App() {
         <div className="page-wrapper stack">
           {route.page === 'run' ? (
             <RunDetail runId={route.runId} onBack={() => { window.location.hash = '#/runs' }} />
+          ) : route.page === 'experiment' ? (
+            <>
+              <div className="page-header">
+                <div className="page-pretitle">
+                  phase {phase ?? '—'} · batch size {batchSize ?? '—'}
+                </div>
+                <h1 className="page-title">Experiment</h1>
+              </div>
+              {unlabeledBanner}
+              <PhaseBar phase={phase} batchSize={batchSize} known={knownPhases}
+                        onChanged={changed} />
+              <PhaseTable report={report} />
+            </>
           ) : route.page === 'runs' ? (
             <>
               <div className="page-header"><h1 className="page-title">Run history</h1></div>
@@ -389,6 +426,7 @@ export default function App() {
                 </div>
               </div>
 
+              {unlabeledBanner}
               {toast ? <div className="notice state-idle"><strong>Alerts.</strong> {toast}</div> : null}
               {stale ? (
                 <div className="notice state-warn">
@@ -492,6 +530,53 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              <div className="row col-2">
+                <div className="card">
+                  <div className="card-header">
+                    <h3 className="card-title">Acquisition impact</h3>
+                    <span className="chart-note">
+                      {/* The note is about now; the chart is the last 30 min,
+                          which may hold arrivals this process never saw. */}
+                      {snap?.inter_arrival_mean_s != null
+                        ? `now ${nf(snap.inter_arrival_mean_s, 1)}s mean · ${nf(snap.inter_arrival_p95_s, 1)}s p95`
+                        : 'nothing arriving right now'}
+                    </span>
+                  </div>
+                  <div className="card-body">
+                    <Chart data={series} yLabel="seconds" allowDecimals lines={[
+                      { key: 'interMean', name: 'mean gap s',
+                        color: token('--azure', '#4299e1') },
+                      { key: 'interP95', name: 'p95 gap s', color: token('--yellow', '#f0ad4e') },
+                    ]} />
+                    <p className="chart-note" style={{ marginBottom: 0 }}>
+                      LumaViewPro does not report its own slowdown. A rising gap between
+                      images is how segmentation stealing disk or CPU from acquisition shows up.
+                    </p>
+                  </div>
+                </div>
+                <div className="card">
+                  <div className="card-header"><h3 className="card-title">Disk</h3>
+                    <span className="chart-note">
+                      {snap?.disk_device ? `${snap.disk_device} · read vs write` : 'read vs write'}
+                    </span></div>
+                  <div className="card-body">
+                    <Chart data={series} yLabel="MB/s" allowDecimals lines={[
+                      { key: 'diskRead', name: 'read MB/s',
+                        color: token('--primary', '#1ABB9C') },
+                      { key: 'diskWrite', name: 'write MB/s',
+                        color: token('--text-muted', '#8a93a3') },
+                    ]} />
+                    <p className="chart-note" style={{ marginBottom: 0 }}>
+                      Read bandwidth is segmentation re-reading what the microscope just
+                      wrote: it separates disk contention from GPU contention.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <PhaseBar phase={phase} batchSize={batchSize} known={knownPhases}
+                        onChanged={changed} />
 
               <Alerts events={events?.events} configured={events?.webhook_configured}
                       onTest={sendTest} busy={busy} />

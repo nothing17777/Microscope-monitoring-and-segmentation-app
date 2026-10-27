@@ -181,6 +181,42 @@ td.err { font-family: var(--font-mono); font-size: 12px; word-break: break-word;
   .sidebar-nav::-webkit-scrollbar-thumb { background: rgba(4, 32, 69, 0.14); }
 }
 
+// --- experiment controls ----------------------------------------------------
+// Switching a phase label happens standing at the microscope, on a phone, so
+// the targets are finger-sized in both layouts rather than only the small one.
+.stack-sm { display: flex; flex-direction: column; gap: var(--space-3); }
+
+.exp-row { display: flex; align-items: baseline; gap: var(--space-3); flex-wrap: wrap; }
+.exp-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted);
+}
+.exp-current {
+  font-family: var(--font-mono); font-size: 15px; color: var(--text);
+}
+.exp-current.is-unset { color: var(--yellow); }
+
+.chip-row { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.chip {
+  font: inherit; font-size: 13px; font-family: var(--font-mono);
+  min-height: 2.5rem; padding: 0 var(--space-3);
+  background: var(--bg-surface-secondary); color: var(--text-secondary);
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm); cursor: pointer;
+}
+.chip:hover:not(:disabled) { color: var(--text); border-color: var(--text-muted); }
+.chip:disabled { opacity: 0.5; cursor: default; }
+.chip.is-on {
+  background: var(--primary); border-color: var(--primary); color: #fff;
+}
+
+.phase-pill {
+  font-family: var(--font-mono); font-size: 12px; text-decoration: none;
+  padding: 3px 8px; border-radius: var(--radius-sm);
+  background: var(--bg-surface-secondary); color: var(--text-secondary);
+  border: 1px solid var(--border-color); white-space: nowrap;
+  max-width: 14rem; overflow: hidden; text-overflow: ellipsis;
+}
+.phase-pill.is-unset { color: var(--yellow); border-color: var(--yellow); }
+
 // --- phone ------------------------------------------------------------------
 // The overnight check from a phone: state, acquisition progress, backlog and
 // ETA stack and stay readable without zooming.
@@ -193,4 +229,6 @@ td.err { font-family: var(--font-mono); font-size: 12px; word-break: break-word;
   .figures { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .plate-grid { min-width: 17rem; }
   table.data { font-size: 12px; }
+  .chip { flex: 1 1 4rem; min-height: 2.75rem; }
+  .phase-pill { max-width: 8rem; }
 }

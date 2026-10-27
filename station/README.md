@@ -18,11 +18,17 @@ station/
   acquisition.py  ControlledAcquisition (stubbed) / ObservedAcquisition
   runs.py         the acquisition lock, pause/resume/cancel, ETAs, queue
   notify.py       webhooks with debounce
-  telemetry.py    run-tagged samples
+  telemetry.py    run-tagged samples, disk read/write throughput
   app.py          FastAPI
   selftest.py     python -m station.selftest
   frontend/       React + Vite + recharts on Gentelella v4
 ```
+
+The experiment instrumentation for the capacity study is partly here and
+partly in `../backend`: phase labels, the report and its markdown live in
+`backend/experiment.py`, and the inter-arrival metric and batch recording
+live in `backend.worker.Worker` so the dashboard gets them too. See
+[Capacity and tuning study](#capacity-and-tuning-study).
 
 > **Do not point both apps at the same `--input-dir` at once.** Each runs its
 > own segmenter; they would both segment the same TIFFs.
@@ -135,6 +141,128 @@ more batches and a spread under 1.5x, otherwise `low`, shown as "(rough)".
 
 Acquisition ETA is the expected total over the rate observed so far, widened
 while little of the plate is in.
+
+## Capacity and tuning study
+
+Instrumentation for answering, live on one 2-hour acquisition, what batch
+size this machine should run at and what segmentation costs acquisition.
+
+### Phase labels
+
+Every telemetry sample and every batch row carries a **phase**: a free-text
+label for what is being tried. `solo_sweep_bs4`, `acquisition_only`,
+`concurrent_bs8`. It is set from the one-click selector on the **Experiment**
+page (the chips are finger-sized: this gets switched from a phone at the
+microscope) or with `POST /api/phase {"name": ...}`. Labels are slugged —
+`solo sweep bs4` is stored as `solo_sweep_bs4`.
+
+The default is `unlabeled`, and a banner says so on every page until a label
+is set. An unlabelled stretch cannot be attributed to anything afterwards,
+and the day it was recorded does not come back.
+
+The phase lives in `kv`, so it survives a restart and the worker picks a
+change up on its next batch without one.
+
+### Batch size, live
+
+`POST /api/config/batch-size {"n": 8}`, or the preset chips on the Experiment
+page. Effective on the **next** batch — the batch in flight finishes at the
+size it started with — with no restart and no drain. The batch size in force
+is recorded on every telemetry sample and on every row of the `batches`
+table, so the sweep can happen inside the one acquisition there is.
+
+OOM halving still applies on top: a CUDA OOM lowers the effective batch size
+and the lowered value is what gets recorded, because that is what ran.
+
+### Acquisition impact
+
+LumaViewPro reports nothing about its own speed, so the proxy is the gap
+between arriving images. `Worker.scan()` keeps a rolling 10-minute window of
+**file mtimes** — not discovery times, which would be quantised to the poll
+interval and would show the scanner's cadence rather than the microscope's —
+and reports mean and p95 of the gaps between them. Under three gaps it
+reports `not enough data`.
+
+The window is in memory, not the database: a restart loses it and the metric
+reports `not enough data` again until three more images land. The charts
+still show the stored history across the restart.
+
+A rising inter-arrival time while segmentation is running is segmentation
+stealing disk or CPU from acquisition. It is charted on the dashboard beside
+throughput, and reported per phase.
+
+Because this lives in `scan()`, the dashboard inherits it unchanged.
+
+### Disk throughput
+
+Read **and** write MB/s for the volume holding `--input-dir`, from
+`psutil.disk_io_counters`. Bytes written alone cannot separate disk
+contention from GPU contention; read bandwidth is segmentation re-reading
+what the microscope just wrote. On Linux the block device backing the input
+directory is resolved from `/sys/dev/block`, so a machine with the OS on one
+NVMe and the image store on another attributes the traffic correctly;
+elsewhere (macOS) it falls back to system-wide counters and the sample says
+`disk_device: "system"`.
+
+### The report
+
+`GET /api/report` (JSON) and `GET /api/report.md` (markdown, paste-ready).
+Both take optional `?minutes=` and `?run_id=`.
+
+- **Headline**: concurrent throughput as a percentage of the solo baseline,
+  labelled as the contention cost. A phase counts as a baseline if its name
+  contains `solo` and as contended if it contains `concurrent`; the
+  comparison is made at a batch size both of them ran, because comparing
+  `concurrent_bs8` against `solo_sweep_bs4` measures the batch size instead.
+- **Per phase**: phase, batch size, duration, images/sec mean + p50/p95,
+  inter-arrival mean/p95, CPU mean/max, RAM mean/max, GPU util mean/max,
+  VRAM mean/max, disk read/write mean/max, and the fraction of samples with
+  GPU utilisation under 20% (GPU idle).
+- **Tuning table**: one row per batch size — throughput against
+  inter-arrival, so the operating point where throughput stops being free is
+  readable at a glance. A phase that changed batch size part-way through is
+  left out of this table rather than averaged across both.
+
+The ETA honesty rule applies throughout: a phase with fewer than 20 samples
+(40 s at the default telemetry interval) reports **`not enough data`** and
+no numbers at all — not a number with a caveat beside it. The same goes for
+the headline, which is absent unless both a solo and a concurrent phase have
+enough data.
+
+`measured_batches` in the JSON is the same throughput counted straight off
+the `batches` table rather than from telemetry sampling, as a cross-check.
+
+### The sweep helper
+
+`sweep.py` cycles batch sizes and sets the phase labels on a timer, so the
+solo sweep runs hands-off before the microscope starts.
+
+```bash
+# baseline at every batch size, 10 minutes each, nobody at the keyboard
+python sweep.py --sizes 1,2,4,8,16 --hold 10m --prefix solo_sweep
+
+# then the phases around the real acquisition
+python sweep.py --phases acquisition_only=20m,concurrent_bs8=40m --batch-size 8
+
+python sweep.py --sizes 1,2,4,8 --dry-run     # print the plan, change nothing
+```
+
+`--settle 2m` labels the first part of each step `NAME_settle`, so the
+previous batch size draining out of the numbers does not land in the step.
+The phase is reset to `unlabeled` when the sweep ends or is interrupted,
+so whatever happens next is not mislabelled as part of a step that stopped
+running. It reads `MM_ST_AUTH_TOKEN` and `MM_ST_BASE` from the environment.
+
+### A day of it
+
+```bash
+python sweep.py --sizes 1,2,4,8,16 --hold 10m          # before the microscope starts
+# start the plate in LumaViewPro, add the run in the UI
+curl -XPOST -H "X-Auth-Token: $MM_ST_AUTH_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"name":"acquisition_only"}' localhost:8100/api/phase
+# ... then switch to concurrent_bs8, concurrent_bs16, ... from the phone
+curl -s localhost:8100/api/report.md > study.md
+```
 
 ## Run history
 
@@ -288,6 +416,9 @@ sudo systemctl disable --now microscope-monitor
 | `--disk-free-threshold-gb` | `MM_ST_DISK_FREE_GB` | `50` |
 | `--plate-rows` / `--plate-cols` | `MM_ST_PLATE_ROWS` / `MM_ST_PLATE_COLS` | `8` / `12` |
 
+`--batch-size` is the starting value only; `POST /api/config/batch-size`
+changes it live and the change is not written back to the config.
+
 ## API
 
 Read-only, no token:
@@ -303,6 +434,9 @@ Read-only, no token:
 | `GET /api/history?minutes=` | recent telemetry across runs |
 | `GET /api/events` | alert history |
 | `GET /api/failures`, `/api/specs`, `/api/config` | as the dashboard |
+| `GET /api/phase` | the phase every sample is being tagged with |
+| `GET /api/report?minutes=&run_id=` | per-phase study report, tuning table, contention headline |
+| `GET /api/report.md` | the same report as markdown |
 | `WS /ws` | a snapshot every 2s |
 
 Token required (`X-Auth-Token`):
@@ -314,3 +448,5 @@ Token required (`X-Auth-Token`):
 | `POST /api/runs/{id}/segmentation/pause` | pause one run's segmentation |
 | `POST /api/segmentation/pause` | global worker pause |
 | `POST /api/notify/test` | send a test alert |
+| `POST /api/phase` | set the experiment phase label (`{"name": "concurrent_bs8"}`) |
+| `POST /api/config/batch-size` | change the batch size live (`{"n": 8}`), next batch |
