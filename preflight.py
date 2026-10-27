@@ -9,6 +9,7 @@ directories are really readable/writable.
     python preflight.py --input-dir /data/lumaviewpro/output
     python preflight.py --input-dir ... --load-model     # also builds cpdino
     python preflight.py --input-dir ... --segment        # also segments one image
+    python preflight.py --input-dir ... --throughput     # ...and times a full-size batch
 
 Exit code 0 if nothing FAILed (warnings are allowed), 1 otherwise.
 """
@@ -242,7 +243,7 @@ def check_frontend() -> None:
                "          or use the Vite dev server on :5173")
 
 
-def check_model_load(model: str, device: str, segment: bool, output_dir: Path) -> None:
+def check_model_load(model: str, device: str, segment: bool, output_dir: Path) -> object | None:
     """Actually construct cpdino, and optionally segment one small image."""
     try:
         import numpy as np
@@ -250,16 +251,16 @@ def check_model_load(model: str, device: str, segment: bool, output_dir: Path) -
         from cellpose.models import CellposeModel
     except Exception as e:  # noqa: BLE001
         report(FAIL, f"load model '{model}'", repr(e))
-        return
+        return None
     try:
         t0 = time.time()
         m = CellposeModel(gpu=device != "cpu", pretrained_model=model, device=torch.device(device))
         report(PASS, f"load model '{model}'", f"{type(m).__name__} on {device} in {time.time() - t0:.1f}s")
     except Exception as e:  # noqa: BLE001
         report(FAIL, f"load model '{model}'", f"{type(e).__name__}: {e}")
-        return
+        return None
     if not segment:
-        return
+        return m
     try:
         rng = np.random.default_rng(0)
         im = rng.integers(200, 900, size=(256, 256), dtype=np.uint16)
@@ -275,6 +276,92 @@ def check_model_load(model: str, device: str, segment: bool, output_dir: Path) -
                f"256x256 -> mask {mask.shape} {mask.dtype}, {n} object(s), {time.time() - t0:.1f}s")
     except Exception as e:  # noqa: BLE001
         report(FAIL, "segment one image", f"{type(e).__name__}: {e}")
+    return m
+
+
+def _hms(seconds: float) -> str:
+    seconds = int(max(seconds, 0))
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}h{m:02d}m" if h else (f"{m}m{sec:02d}s" if m else f"{sec}s")
+
+
+def _image_shape(input_dir: Path, fallback: int) -> tuple[tuple[int, int], str]:
+    """Dimensions of the first real TIFF, so the estimate uses the real size."""
+    try:
+        import tifffile
+        for suffix in ("*.tif", "*.tiff", "*.TIF", "*.TIFF"):
+            for path in sorted(input_dir.rglob(suffix)):
+                with tifffile.TiffFile(str(path)) as tf:
+                    shape = tf.pages[0].shape
+                if len(shape) >= 2:
+                    return (int(shape[-2]), int(shape[-1])), path.name
+    except Exception:  # noqa: BLE001
+        pass
+    return (fallback, fallback), "no TIFF found — assumed"
+
+
+def check_plate_plan(plan: dict, shape: tuple[int, int], shape_src: str) -> dict:
+    """The arithmetic of the planned run: how many images, how fast they land."""
+    total = plan["wells"] * plan["tiles"] * plan["slices"] * plan["channels"]
+    run_s = plan["hours"] * 3600
+    rate = total / run_s
+    report(PASS, "plate plan",
+           f"{plan['wells']} wells x {plan['tiles']} tiles x {plan['slices']} slices "
+           f"x {plan['channels']} channels = {total:,} images in {plan['hours']:g}h")
+    report(PASS, "acquisition rate",
+           f"{rate:.2f} images/s — one every {1 / rate:.2f}s; "
+           f"segmentation must stay under that to hold backlog flat")
+    report(PASS, "image size", f"{shape[0]}x{shape[1]} (from {shape_src})")
+    return {"total": total, "run_s": run_s, "rate": rate}
+
+
+def check_throughput(m, device: str, batch_size: int, shape: tuple[int, int], plan: dict) -> None:
+    """Time one full-size batch, then project the backlog over the whole run."""
+    try:
+        import numpy as np
+        import torch
+    except Exception as e:  # noqa: BLE001
+        report(FAIL, "throughput", repr(e))
+        return
+    try:
+        rng = np.random.default_rng(0)
+        h, w = shape
+        im = rng.integers(200, 900, size=(h, w), dtype=np.uint16)
+        yy, xx = np.mgrid[0:h, 0:w]
+        for cy in range(h // 10, h, h // 10):
+            for cx in range(w // 10, w, w // 10):
+                im[(yy - cy) ** 2 + (xx - cx) ** 2 < (min(h, w) // 50) ** 2] += 6000
+        batch = [im] * batch_size
+        m.eval(batch[:1], batch_size=1)  # warm up; first call pays one-off costs
+        t0 = time.time()
+        m.eval(batch, batch_size=batch_size)
+        per_image = (time.time() - t0) / batch_size
+    except Exception as e:  # noqa: BLE001
+        report(FAIL, "throughput", f"{type(e).__name__}: {e}")
+        return
+
+    seg_rate = 1 / per_image
+    report(PASS, "measured throughput",
+           f"{per_image:.2f}s/image on {device} at {h}x{w}, batch of {batch_size} "
+           f"({seg_rate:.2f} images/s)")
+
+    headroom = seg_rate / plan["rate"]
+    seg_total_s = plan["total"] * per_image
+    if headroom >= 1:
+        report(PASS, "keeps up with acquisition",
+               f"{headroom:.1f}x headroom — backlog stays flat; "
+               f"{_hms(seg_total_s)} of GPU time across a {_hms(plan['run_s'])} run")
+    else:
+        backlog = plan["total"] - int(plan["run_s"] * seg_rate)
+        catch_up = backlog * per_image
+        report(WARN, "keeps up with acquisition",
+               f"{headroom:.2f}x — segmentation is {1 / headroom:.1f}x too slow. "
+               f"Backlog at the end of acquisition: ~{backlog:,} images,\n"
+               f"          cleared {_hms(catch_up)} later (total {_hms(plan['run_s'] + catch_up)}). "
+               f"The banner will read SEGMENTATION FALLING BEHIND.\n"
+               f"          To hold it flat, the plan must shrink to "
+               f"~{int(plan['run_s'] * seg_rate):,} images.")
 
 
 # --- main -------------------------------------------------------------------
@@ -289,6 +376,15 @@ def main() -> int:
                    help="actually construct the model (downloads ~1.1 GB on first use)")
     p.add_argument("--segment", action="store_true",
                    help="implies --load-model, and segments one synthetic 256x256 image")
+    p.add_argument("--throughput", action="store_true",
+                   help="implies --load-model: time a full-size batch and project the backlog")
+    p.add_argument("--batch-size", type=int, default=int(os.environ.get("MM_BATCH_SIZE", "16")))
+    # Defaults are the planned 96-well run: 2x2 tiles, 20-slice stack, phase + green.
+    p.add_argument("--wells", type=int, default=96)
+    p.add_argument("--tiles", type=int, default=4, help="tiles per well (2x2 = 4)")
+    p.add_argument("--slices", type=int, default=20)
+    p.add_argument("--channels", type=int, default=2)
+    p.add_argument("--run-hours", type=float, default=2.0, help="planned acquisition duration")
     a = p.parse_args()
 
     input_dir = Path(a.input_dir).expanduser().resolve()
@@ -309,10 +405,26 @@ def main() -> int:
     check_dinov3()
     check_cellpose()
     check_model_cache(a.model)
-    if a.load_model or a.segment:
-        check_model_load(a.model, device, a.segment, output_dir)
+    model = None
+    if a.load_model or a.segment or a.throughput:
+        model = check_model_load(a.model, device, a.segment, output_dir)
     else:
         report(WARN, "model construction", "skipped — pass --load-model (or --segment) to really build it")
+
+    section("throughput")
+    shape, shape_src = _image_shape(input_dir, 2048)
+    plan = check_plate_plan(
+        {"wells": a.wells, "tiles": a.tiles, "slices": a.slices,
+         "channels": a.channels, "hours": a.run_hours},
+        shape, shape_src,
+    )
+    if a.throughput and model is not None:
+        check_throughput(model, device, a.batch_size, shape, plan)
+    elif a.throughput:
+        report(FAIL, "measured throughput", "model failed to load; cannot measure")
+    else:
+        report(WARN, "measured throughput",
+               "not measured — pass --throughput to time a real batch and project the backlog")
 
     section("storage and service")
     check_dirs(input_dir, output_dir)

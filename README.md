@@ -110,14 +110,34 @@ the input dir (exists, readable, TIFF count), output dir writability, free
 space, the input volume's filesystem; the port; and whether `frontend/dist`
 was built.
 
-Two optional flags go further, at the cost of a ~1.1 GB download on first use:
+Three optional flags go further, at the cost of a ~1.1 GB download on first use:
 
 ```bash
 python preflight.py --input-dir ... --load-model   # actually construct cpdino
 python preflight.py --input-dir ... --segment      # ...and segment one image
+python preflight.py --input-dir ... --throughput   # ...and time a full-size batch
 ```
 
 Warnings are survivable; any `FAIL` means don't start the run.
+
+### Will it keep up?
+
+The `throughput` section answers that before the run rather than during it. The
+plate plan defaults to the planned acquisition — 96 wells, 2x2 tiles, 20 slices,
+2 channels, 2 hours = **15,360 images, one every 0.47 s** — and is overridable
+with `--wells / --tiles / --slices / --channels / --run-hours`. The image size
+is read from the first TIFF in the input dir, not assumed.
+
+`--throughput` then times one real batch at that size (after a warm-up call, so
+one-off costs don't skew it) and projects the backlog: headroom if segmentation
+keeps up, or how many images are still queued when acquisition ends, how long
+they take to clear, and how far the plan would have to shrink to hold backlog
+flat. Falling behind is a `WARN`, not a `FAIL` — a growing backlog is a valid
+thing to demonstrate, it just shouldn't be a surprise.
+
+For reference, the M4 Mac mini measures **34.7 s/image at 2048x2048 on MPS**,
+i.e. 74x too slow for the plan above. Run this on the Ubuntu workstation to get
+the number that actually matters.
 
 ## Local test (Mac mini)
 
