@@ -282,6 +282,117 @@ def test_report(tmp: Path) -> None:
     ok(md.count("|") > 20, "the markdown contains the tables")
 
 
+def test_analysis(tmp: Path) -> None:
+    """The bounding-box ROI/filter rewrite must match the script's whole-frame one."""
+    print("analysis (vs the validated script's whole-frame algorithm)")
+    import numpy as np
+    from skimage.measure import find_contours, regionprops
+    from skimage.segmentation import relabel_sequential
+
+    from backend import analysis
+
+    rng = np.random.default_rng(0)
+    labels = np.zeros((300, 300), np.int32)
+    n = 0
+    for _ in range(60):
+        r, c, rad = rng.integers(0, 300), rng.integers(0, 300), rng.integers(3, 25)
+        yy, xx = np.ogrid[:300, :300]
+        n += 1
+        labels[(yy - r) ** 2 + (xx - c) ** 2 <= rad ** 2] = n
+    labels, _, _ = relabel_sequential(labels)
+    ok(labels[0].any() or labels[:, 0].any() or labels[-1].any(),
+       "the fixture has cells touching the frame edge")
+
+    s = analysis.Settings(min_equiv_diameter_um=26)
+    ref = labels.copy()
+    min_px = s.min_equiv_diameter_um / s.pixel_size_um
+    for p in regionprops(ref):
+        if np.sqrt(4.0 * p.area / np.pi) < min_px:
+            ref[ref == p.label] = 0
+    ref, _, _ = relabel_sequential(ref)
+    got = analysis.filter_min_diameter(labels, s)
+    ok(np.array_equal(ref, got), "the size filter matches the whole-frame filter")
+
+    ref_polys = []
+    for lab in [i for i in np.unique(got) if i > 0]:
+        m = (got == lab).astype(np.uint8)
+        if m.sum() < 5:
+            continue
+        cs = find_contours(m, level=0.5)
+        c = max(cs, key=lambda a: a.shape[0])
+        if c.shape[0] < 6:
+            continue
+        ref_polys.append(np.column_stack([
+            np.clip(np.rint(c[:, 1]), 0, got.shape[1] - 1).astype(np.int16),
+            np.clip(np.rint(c[:, 0]), 0, got.shape[0] - 1).astype(np.int16)]))
+    _rois, polys = analysis.rois_and_polygons(got)
+    ok(len(polys) == len(ref_polys) and all(np.array_equal(a, b) for a, b in zip(polys, ref_polys)),
+       "ROI polygons match the whole-frame contours, edge cells included")
+
+    res = analysis.analyze(labels, s)
+    ok(res.cells == int(got.max()), "the count is the filtered label image's maximum")
+    out = analysis.export(tmp / "X1_PC_TA1_Z0_0000.tiff", labels.astype(np.uint8), res,
+                          tmp / "exp", s)
+    import tifffile
+    ok(np.array_equal(tifffile.imread(out), res.labels),
+       "the mask TIFF round-trips the label image losslessly")
+    rows = (tmp / "exp" / "density_per_well.csv").read_text().splitlines()
+    ok(rows[0] == ",".join(analysis.CSV_FIELDS) and len(rows) == 2,
+       "the CSV has the script's columns and one row per image")
+
+
+def test_lvp(tmp: Path) -> None:
+    print("LumaViewPro naming and protocol")
+    from . import lvp
+    m = lvp.parse_name(Path("B11_Green_TA2_Z11_0000.tiff"))
+    ok(m == {"channel": "Green", "tile": "TA2", "z": 11, "scan": 0}, "an LVP file name parses")
+    ok(lvp.parse_name(Path("img_0001.tif")) is None, "a foreign name parses to nothing")
+    d = tmp / "20261027_155550"
+    d.mkdir()
+    head = "Name\tX\tAcquire\n"
+    steps = "".join(f"s{i}\t0\timage\n" for i in range(5)) + "v\t0\tvideo\n"
+    (d / "unsaved_protocol.tsv").write_text(
+        f"LumaViewPro Protocol\nVersion\t8\n\nSteps\n{head}{steps}")
+    ok(lvp.expected_images(d) == 5, "expected images counts the image steps only")
+    ok(lvp.expected_images(tmp) == 0, "no protocol file means an unknown total, not a guess")
+    ok(lvp.folder_started_at(d) is not None, "the start time comes from the folder name")
+
+
+def test_capture_folders(tmp: Path) -> None:
+    print("capture folders -> runs")
+    import os
+    import numpy as np
+    import tifffile
+
+    from .worker import StationWorker
+    root = tmp / "ProtocolData"
+    old, live = root / "20260101_000000", root / "20261027_155550"
+    for d in (old, live):
+        d.mkdir(parents=True)
+        tifffile.imwrite(d / "A1_PC_TA1_Z0_0000.tiff", np.zeros((32, 32), np.uint8))
+    past = time.time() - 86400
+    os.utime(old, (past, past))
+    cfg = _cfg(tmp, input_dir=root, output_dir=tmp / "cf_out", poll_interval=0.01)
+    cfg.dry_run = True
+    db = Database(tmp / "cf.sqlite")
+    w = StationWorker(cfg, db)
+    w.scan()
+    time.sleep(0.05)
+    w.scan()
+    runs = db.list_runs()
+    ok([r["source_dir"] for r in runs] == [live.name],
+       "only the folder still being written becomes a run; the old one is skipped")
+    ok(db.counts(runs[0]["id"])["found"] == 1, "the run owns the image in its folder")
+    w.segment_one_batch()
+    out = tmp / "cf_out" / live.name
+    ok((out / "masks" / "A1_PC_TA1_Z0_0000_masks.tiff").exists()
+       and (out / "density_per_well.csv").exists(),
+       "outputs land under the capture folder's own name")
+    row = db._q("SELECT channel, tile, z, cells FROM images")[0]  # noqa: SLF001
+    ok((row["channel"], row["tile"], row["z"]) == ("PC", "TA1", 0) and row["cells"] is not None,
+       "channel, tile, Z and the cell count are stored per image")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -292,6 +403,9 @@ def main() -> int:
         test_batch_size(tmp)
         test_arrivals(tmp)
         test_report(tmp)
+        test_analysis(tmp)
+        test_lvp(tmp)
+        test_capture_folders(tmp)
     failed = [m for ok_, m in _results if not ok_]
     print(f"\n{len(_results) - len(failed)} passed, {len(failed)} failed")
     for m in failed:

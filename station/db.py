@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at          REAL,
     seg_status           TEXT NOT NULL DEFAULT 'active',  -- active|paused|cancelled
     baseline_count       INTEGER NOT NULL DEFAULT 0,
-    error                TEXT
+    error                TEXT,
+    source_dir           TEXT     -- the LVP capture folder this run mirrors
 );
 CREATE INDEX IF NOT EXISTS runs_status ON runs(status);
 
@@ -50,7 +51,12 @@ CREATE TABLE IF NOT EXISTS images (
     mask_path  TEXT,
     error      TEXT,
     found_at   REAL NOT NULL,
-    done_at    REAL
+    done_at    REAL,
+    channel    TEXT,             -- parsed from the LVP file name, if it parses
+    tile       TEXT,
+    z          INTEGER,
+    cells      INTEGER,          -- after the minimum-diameter filter
+    density    REAL              -- cells / cm^2
 );
 CREATE INDEX IF NOT EXISTS images_state ON images(state);
 CREATE INDEX IF NOT EXISTS images_run ON images(run_id, state);
@@ -92,6 +98,14 @@ CREATE TABLE IF NOT EXISTS kv (
 );
 """
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
+# existing database alone, so they are added here, once, on open.
+MIGRATIONS = {
+    "runs": {"source_dir": "TEXT"},
+    "images": {"channel": "TEXT", "tile": "TEXT", "z": "INTEGER",
+               "cells": "INTEGER", "density": "REAL"},
+}
+
 ACTIVE_RUN = ("queued", "running", "paused")
 TERMINAL_RUN = ("done", "failed", "cancelled")
 
@@ -105,6 +119,13 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            for table, cols in MIGRATIONS.items():
+                have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                for col, typ in cols.items():
+                    if col not in have:
+                        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS runs_source ON runs(source_dir)")
             self._conn.commit()
 
     def close(self) -> None:
@@ -157,6 +178,15 @@ class Database:
             "SELECT * FROM runs WHERE status IN ('running','paused') ORDER BY id LIMIT 1")
         return dict(rows[0]) if rows else None
 
+    def run_for_source(self, source_dir: str) -> int | None:
+        rows = self._q("SELECT id FROM runs WHERE source_dir=? ORDER BY id DESC LIMIT 1",
+                       (source_dir,))
+        return int(rows[0]["id"]) if rows else None
+
+    def source_dirs(self) -> set[str]:
+        return {r["source_dir"] for r in
+                self._q("SELECT DISTINCT source_dir FROM runs WHERE source_dir IS NOT NULL")}
+
     def current_run_id(self) -> int | None:
         """Where newly discovered images belong."""
         rows = self._q(
@@ -184,7 +214,8 @@ class Database:
         if run_id is not None:
             sql += " AND run_id=?"
             args.append(run_id)
-        sql += " ORDER BY found_at LIMIT ?"
+        # path breaks ties: a first scan finds thousands of images at one instant
+        sql += " ORDER BY found_at, path LIMIT ?"
         args.append(limit)
         return self._q(sql, tuple(args))
 
@@ -195,6 +226,27 @@ class Database:
     def mark_failed(self, path: str, error: str) -> None:
         self._x("UPDATE images SET state='failed', error=?, done_at=? WHERE path=?",
                 (error[:4000], time.time(), path))
+
+    def set_result(self, path: str, cells: int, density: float) -> None:
+        self._x("UPDATE images SET cells=?, density=? WHERE path=?", (cells, density, path))
+
+    def well_results(self, run_id: int) -> dict[str, dict[str, dict[str, float]]]:
+        """Per well, per channel: images segmented, and cells per image.
+
+        Per image, not summed: every Z-slice of a tile is the same cells, so
+        a sum over a stack would count each cell up to twenty times.
+        """
+        rows = self._q(
+            "SELECT well, COALESCE(channel,'') ch, COUNT(*) n, MAX(cells) mx, "
+            "AVG(cells) mean, AVG(density) dens FROM images "
+            "WHERE run_id=? AND well IS NOT NULL AND state='done' AND cells IS NOT NULL "
+            "GROUP BY well, ch", (run_id,))
+        out: dict[str, dict[str, dict[str, float]]] = {}
+        for r in rows:
+            out.setdefault(r["well"], {})[r["ch"]] = {
+                "images": r["n"], "max_cells": r["mx"], "mean_cells": r["mean"],
+                "mean_density": r["dens"]}
+        return out
 
     def set_dims(self, path: str, width: int, height: int) -> None:
         self._x("UPDATE images SET width=?, height=? WHERE path=?", (width, height, path))

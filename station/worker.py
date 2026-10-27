@@ -6,24 +6,25 @@ stable_seconds, plus the truncated-read retry) — is inherited untouched, so
 that logic physically cannot drift between the two apps. Only the parts that
 are run-aware are overridden:
 
-  _job_for_new_files  -> the run a newly discovered image belongs to
+  _wanted             -> which LVP capture folders to look at
+  _job_for_path       -> one run per capture folder (ProtocolData/<timestamp>)
+  _job_for_new_files  -> the run a loose image belongs to
   _globally_paused    -> station's own pause flag
   segment_one_batch   -> pulls work for one run, honours per-run pause/cancel
 
 Everything to do with the model (batching by dimensions, the OOM halving,
-mask paths, dry-run masks) comes from the parent.
+the validated settings and exports in backend/analysis.py, dry-run masks)
+comes from the parent.
 """
 import logging
 import threading
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+from backend.worker import Worker as BaseWorker
 
-from backend.worker import Worker as BaseWorker, _dims, _read_image
-
+from . import lvp
 from .config import Config
 from .db import Database
 from .wells import well_of
@@ -41,6 +42,9 @@ class StationWorker(BaseWorker):
         self.current_run_id: int | None = None
         self._cancelled: set[int] = set()
         self._lock = threading.Lock()
+        # Capture folder name -> segment it or not. Decided once per folder.
+        self._folders: dict[str, bool] = {}
+        self._started_at = time.time()
 
     # --- run attribution ---------------------------------------------------
 
@@ -64,6 +68,72 @@ class StationWorker(BaseWorker):
             log.warning("images appeared with no active run; opened run #%s", run_id)
             return run_id
 
+    # --- capture folders -----------------------------------------------------
+
+    def _folder_of(self, path: Path) -> str | None:
+        """The capture folder an image sits directly inside, or None if loose."""
+        try:
+            rel = path.relative_to(self.cfg.input_dir)
+        except ValueError:
+            return None
+        return rel.parts[0] if len(rel.parts) == 2 else None
+
+    def _wanted(self, path: Path) -> bool:
+        try:
+            parts = path.relative_to(self.cfg.input_dir).parts
+        except ValueError:
+            return False
+        if len(parts) == 1:
+            return True  # loose files: the original single-folder mode
+        if len(parts) != 2:
+            return False  # LVP post-processing output nested inside a run
+        folder = parts[0]
+        ok = self._folders.get(folder)
+        if ok is None:
+            ok = self._folders[folder] = self._decide(folder)
+        return ok
+
+    def _decide(self, folder: str) -> bool:
+        """Whether a capture folder seen for the first time is segmented.
+
+        ProtocolData keeps every run ever taken. Queuing all of them on
+        startup would bury the live acquisition under weeks of old plates,
+        so a folder that was already there is taken only if it already has a
+        run, was named, or is still being written to.
+        """
+        if folder in self.db.source_dirs() or folder in self.cfg.capture_folders:
+            return True
+        if self.cfg.include_existing:
+            return True
+        try:
+            mtime = (self.cfg.input_dir / folder).stat().st_mtime
+        except OSError:
+            return False
+        if mtime >= self._started_at - self.cfg.active_window:
+            return True
+        log.info("skipping capture folder %s: finished before startup "
+                 "(use --capture-folder %s to segment it)", folder, folder)
+        return False
+
+    def _job_for_path(self, path: Path) -> int:
+        folder = self._folder_of(path)
+        if folder is None:
+            return self._job_for_new_files()
+        with self._lock:
+            run_id = self.db.run_for_source(folder)
+            if run_id is not None:
+                return run_id
+            d = self.cfg.input_dir / folder
+            expected = lvp.expected_images(d)
+            run_id = self.db.create_run(
+                folder, plate="", expected=expected, baseline=0, status="running",
+                notes=f"LumaViewPro capture folder {d}")
+            self.db.update_run(run_id, source_dir=folder,
+                               started_at=lvp.folder_started_at(d) or time.time())
+            log.info("capture folder %s -> run #%s (%s images expected)",
+                     folder, run_id, expected or "unknown")
+            return run_id
+
     def scan(self) -> int:
         n = super().scan()
         if n:
@@ -71,13 +141,15 @@ class StationWorker(BaseWorker):
         return n
 
     def _tag_wells(self) -> None:
-        """Fill in the well for images the scan just added."""
+        """Fill in well, channel, tile and Z for images the scan just added."""
         rows = self.db._q(  # noqa: SLF001 - same package, one connection
-            "SELECT path FROM images WHERE well IS NULL LIMIT 5000")
+            "SELECT path FROM images WHERE well IS NULL AND channel IS NULL LIMIT 5000")
         for r in rows:
             w = well_of(r["path"], self.cfg.input_dir)
-            if w:
-                self.db._x("UPDATE images SET well=? WHERE path=?", (w, r["path"]))  # noqa: SLF001
+            meta = lvp.parse_name(Path(r["path"])) or {}
+            self.db._x(  # noqa: SLF001
+                "UPDATE images SET well=?, channel=?, tile=?, z=? WHERE path=?",
+                (w, meta.get("channel", ""), meta.get("tile"), meta.get("z"), r["path"]))
 
     # --- pausing -----------------------------------------------------------
 
@@ -119,44 +191,8 @@ class StationWorker(BaseWorker):
             return False
         self.current_run_id = run_id
 
-        groups: dict[tuple[Any, Any], list[str]] = defaultdict(list)
-        for r in rows:
-            groups[(r["width"], r["height"])].append(r["path"])
-        key = max(groups, key=lambda k: len(groups[k]))
-        paths = groups[key][: self.batch_size]
-
-        images: list[np.ndarray] = []
-        kept: list[str] = []
-        for path in paths:
-            try:
-                arr = _read_image(Path(path))
-                h, w = _dims(arr)
-                self.db.set_dims(path, w, h)
-                if (w, h) != key and key != (None, None):
-                    continue
-                images.append(arr)
-                kept.append(path)
-            except Exception as e:  # noqa: BLE001
-                self.db.mark_failed(path, f"read failed: {e!r}")
-                log.warning("read failed %s: %r", path, e)
-        if not kept:
-            return True
-
-        t0 = time.time()
-        masks = self._run_model(images)
-        if masks is None:
-            return False
-        self._record_batch(len(kept), time.time() - t0)
-
-        for path, mask in zip(kept, masks):
-            try:
-                out = self._mask_path(Path(path))
-                out.parent.mkdir(parents=True, exist_ok=True)
-                np.save(str(out), np.asarray(mask))
-                self.db.mark_done(path, str(out))
-            except Exception as e:  # noqa: BLE001
-                self.db.mark_failed(path, f"mask write failed: {e!r}")
-                log.exception("mask write failed for %s", path)
+        if self._segment_rows(rows) is None:
+            return False  # model failure: back off until the next poll
         return True
 
     def _finish_drained_runs(self) -> None:

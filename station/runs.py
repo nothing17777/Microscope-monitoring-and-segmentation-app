@@ -159,7 +159,9 @@ class RunManager:
     # --- views -------------------------------------------------------------
 
     def captured(self, run: dict) -> int:
-        if run["status"] in ("done", "cancelled", "failed"):
+        if run["status"] in ("done", "cancelled", "failed") or run.get("source_dir"):
+            # A capture-folder run counts its own folder; the adapter counts
+            # every TIFF under ProtocolData, past runs included.
             return self.db.counts(run["id"])["found"]
         observed = self.adapter.observed_count() - int(run["baseline_count"] or 0)
         # The scanner's own count is the floor: files it has already recorded
@@ -169,6 +171,7 @@ class RunManager:
     def plate(self, run_id: int) -> dict[str, Any]:
         """96 wells, each in exactly one state, for the plate map."""
         counts = self.db.well_counts(run_id)
+        results = self.db.well_results(run_id)
         cells = []
         for well in grid(self.cfg.plate_rows, self.cfg.plate_cols):
             c = counts.get(well, {})
@@ -185,7 +188,8 @@ class RunManager:
             else:
                 state = "done"
             cells.append({"well": well, "state": state, "done": done,
-                          "pending": pending, "failed": failed, "total": total})
+                          "pending": pending, "failed": failed, "total": total,
+                          "channels": results.get(well, {})})
         unknown = self.db.counts(run_id)["found"] - sum(c["total"] for c in cells)
         return {"rows": self.cfg.plate_rows, "cols": self.cfg.plate_cols,
                 "cells": cells, "unplaced": max(0, unknown)}

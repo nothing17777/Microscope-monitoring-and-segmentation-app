@@ -36,7 +36,9 @@ export default function Plate({ plate }) {
                   // Title carries the numbers: the circle says which state,
                   // hovering says how many, so colour is never the only channel.
                   title={`${well} — ${LABEL[cell.state]}` +
-                    (cell.total ? ` · ${cell.done}/${cell.total} segmented` : '')}
+                    (cell.total ? ` · ${cell.done}/${cell.total} segmented` : '') +
+                    Object.entries(cell.channels || {}).map(([ch, r]) =>
+                      `\n${ch || 'image'}: max ${r.max_cells} cells/image`).join('')}
                 />
               )
             })}

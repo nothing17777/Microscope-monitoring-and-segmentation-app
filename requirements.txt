@@ -13,3 +13,7 @@ cellpose>=4.0
 # declare as a dependency -- without it CellposeModel(pretrained_model='cpdino')
 # raises NameError: dinov3_vitl16 at construction. Install it explicitly:
 #   pip install git+https://github.com/facebookresearch/dinov3
+# Exports ported from the validated script (backend/analysis.py)
+roifile>=2024.9.13
+scikit-image>=0.24
+pillow>=10

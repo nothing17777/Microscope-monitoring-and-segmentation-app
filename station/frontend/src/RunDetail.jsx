@@ -17,6 +17,49 @@ function Figure({ label, value, unit, sub, big }) {
   )
 }
 
+// Per image, never summed: the Z-slices of one tile see the same cells, so a
+// sum over the stack would count each cell up to twenty times.
+function WellResults({ plate }) {
+  const rows = (plate?.cells || []).filter((c) => Object.keys(c.channels || {}).length)
+  const channels = [...new Set(rows.flatMap((c) => Object.keys(c.channels)))].sort()
+  return (
+    <div className="card">
+      <div className="card-header"><h3 className="card-title">Cell counts</h3>
+        <span className="chart-note">per image, after the size filter</span></div>
+      <div className="card-body">
+        {rows.length ? (
+          <table className="data">
+            <thead>
+              <tr><th>Well</th>{channels.map((ch) => (
+                <React.Fragment key={ch}>
+                  <th>{ch || 'image'} images</th><th>{ch || 'image'} max cells</th>
+                  <th>{ch || 'image'} mean cells/cm²</th>
+                </React.Fragment>))}</tr>
+            </thead>
+            <tbody>
+              {rows.map((c) => (
+                <tr key={c.well}>
+                  <td className="num">{c.well}</td>
+                  {channels.map((ch) => {
+                    const r = c.channels[ch]
+                    return (
+                      <React.Fragment key={ch}>
+                        <td className="num">{r ? int(r.images) : '—'}</td>
+                        <td className="num">{r ? int(r.max_cells) : '—'}</td>
+                        <td className="num">{r ? int(Math.round(r.mean_density)) : '—'}</td>
+                      </React.Fragment>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p className="muted" style={{ margin: 0 }}>No images segmented yet.</p>}
+      </div>
+    </div>
+  )
+}
+
 export default function RunDetail({ runId, onBack }) {
   const [detail, setDetail] = useState(null)
   const [history, setHistory] = useState(null)
@@ -85,6 +128,8 @@ export default function RunDetail({ runId, onBack }) {
           <span className="chart-note">{r.wells_seen} of {r.wells_total} wells touched</span></div>
         <div className="card-body"><Plate plate={detail.plate} /></div>
       </div>
+
+      <WellResults plate={detail.plate} />
 
       <div className="card">
         <div className="card-header"><h3 className="card-title">Backlog</h3>

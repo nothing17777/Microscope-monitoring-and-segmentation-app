@@ -34,6 +34,9 @@ class Config:
     disk_free_threshold_gb: float
     plate_rows: int
     plate_cols: int
+    include_existing: bool = False
+    capture_folders: tuple[str, ...] = ()
+    active_window: float = 900.0
 
     # Named for the parent Worker in ../backend, which reads cfg.specs_path.
     specs_path: Path = field(default=Path("/dev/null"))
@@ -54,7 +57,8 @@ def load_config(argv: list[str] | None = None) -> Config:
     p.add_argument("--db-path", default=_env("MM_ST_DB_PATH", "./data/station.sqlite"))
     p.add_argument("--host", default=_env("MM_ST_HOST", "0.0.0.0"))
     p.add_argument("--port", type=int, default=int(_env("MM_ST_PORT", "8100")))
-    p.add_argument("--batch-size", type=int, default=int(_env("MM_ST_BATCH_SIZE", "16")))
+    p.add_argument("--batch-size", type=int, default=int(_env("MM_ST_BATCH_SIZE", "2")),
+                   help="Images per GPU call. 2 is what the validated script ran with.")
     p.add_argument("--poll-interval", type=float, default=float(_env("MM_ST_POLL_INTERVAL", "5")))
     p.add_argument("--stable-seconds", type=float, default=float(_env("MM_ST_STABLE_SECONDS", "0")),
                    help="0 means 2x --poll-interval")
@@ -79,6 +83,21 @@ def load_config(argv: list[str] | None = None) -> Config:
                    default=float(_env("MM_ST_DISK_FREE_GB", "50")))
     p.add_argument("--plate-rows", type=int, default=int(_env("MM_ST_PLATE_ROWS", "8")))
     p.add_argument("--plate-cols", type=int, default=int(_env("MM_ST_PLATE_COLS", "12")))
+    # Pointing --input-dir at LVP's ProtocolData makes every capture folder
+    # in it a run of its own. These decide which folders already there at
+    # startup are taken; folders that appear later always are.
+    p.add_argument("--include-existing", action="store_true",
+                   default=_flag("MM_ST_INCLUDE_EXISTING"),
+                   help="Also segment capture folders that were already finished "
+                        "at startup. Off by default: ProtocolData keeps every "
+                        "past run, and they would all be queued.")
+    p.add_argument("--capture-folder", action="append", default=[],
+                   help="A capture folder name under --input-dir to segment even "
+                        "though it predates startup. Repeatable.")
+    p.add_argument("--active-window", type=float,
+                   default=float(_env("MM_ST_ACTIVE_WINDOW", "900")),
+                   help="A folder present at startup is taken if it changed in "
+                        "the last this-many seconds: an acquisition in progress.")
     a = p.parse_args(argv)
     return Config(
         input_dir=Path(a.input_dir).expanduser().resolve(),
@@ -100,4 +119,7 @@ def load_config(argv: list[str] | None = None) -> Config:
         disk_free_threshold_gb=a.disk_free_threshold_gb,
         plate_rows=a.plate_rows,
         plate_cols=a.plate_cols,
+        include_existing=a.include_existing,
+        capture_folders=tuple(a.capture_folder),
+        active_window=a.active_window,
     )

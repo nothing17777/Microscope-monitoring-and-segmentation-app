@@ -162,6 +162,8 @@ def create_app(cfg: Config) -> FastAPI:
             "plate": {"rows": cfg.plate_rows, "cols": cfg.plate_cols},
             "phase": experiment.get_phase(db),
             "batch_size_effective": worker.batch_size,
+            "segmentation": worker.seg.describe(),
+            "capture_folders": {k: v for k, v in sorted(worker._folders.items())},  # noqa: SLF001
         }
 
     @app.get("/api/phase")

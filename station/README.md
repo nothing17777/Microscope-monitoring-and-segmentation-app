@@ -52,6 +52,15 @@ cd .. && python -m station.main \
   --db-path /var/lib/microscope-monitor/station.sqlite
 ```
 
+On the lab workstation (see [`docs/WORKSTATION.md`](../docs/WORKSTATION.md)),
+point it at LumaViewPro's `ProtocolData`:
+
+```bash
+~/cellpose-cpdino-env/bin/python -m station.main \
+  --input-dir ~/Projects/Etaluma_API/LumaViewPro-4.0.0-beta/capture/ProtocolData \
+  --output-dir "$HOME/Desktop/RP/Station Output" --db-path ./data/station.sqlite
+```
+
 Open `http://<workstation-ip>:8100`. Add `--dry-run` to see the UI without a
 working Cellpose install. For the frontend dev server, `npm run dev` in
 `station/frontend` serves :5174 and proxies to :8100.
@@ -97,6 +106,30 @@ One acquisition at a time. The lock is taken inside one mutex in
 `RunManager.create`, not in the UI: two browsers pressing the button at the
 same moment produce one run and one `409`.
 
+### LumaViewPro capture folders
+
+LumaViewPro 4 writes each protocol run into its own folder,
+`ProtocolData/YYYYMMDD_HHMMSS/`, with every image flat inside it
+(`A1_PC_TA1_Z0_0000.tiff`: well, color, tile, Z-slice, scan). With
+`--input-dir` pointed at `ProtocolData`, each such folder becomes a run of its
+own, automatically: named for the folder, started at the time in its name,
+and expecting as many images as the protocol LVP saved beside them
+(`unsaved_protocol.tsv`, image steps only), so its ETA and auto-completion
+work without anyone typing a number. Channel, tile and Z are parsed from the
+name when it parses (`station/lvp.py`); nothing is required to.
+
+`ProtocolData` keeps every run ever taken, so folders already there at
+startup are skipped unless they changed in the last `--active-window`
+seconds (an acquisition in progress), already have a run, are named with
+`--capture-folder`, or `--include-existing` is set. Folders that appear later
+are always taken. Files nested deeper (post-processing output) are ignored.
+
+Outputs mirror the folder: `<output-dir>/<folder>/masks/*_masks.tiff`,
+`rois/*.zip`, `debug_plots/*.png` and `density_per_well.csv`, exactly what
+`Etaluma_Live_Segmentation_Optimized.py` wrote, and with the same settings
+(`backend/analysis.py`). Two captures can no longer write into one output
+folder and skip each other's identically named images.
+
 Images arriving with no run active land in an `Unassigned` run rather than
 being dropped — someone starting LumaViewPro before touching the dashboard is
 a real case.
@@ -117,6 +150,10 @@ The well comes from the image path — any component or filename prefix that
 looks like a well label, preferring the one nearest the file. No naming
 scheme is hardcoded. Images whose path says nothing are counted as
 `unplaced` and shown as such rather than guessed into A01.
+
+Hovering a well also gives the most cells found in one image per channel, and
+the run page has a per-well table of images, max cells and mean cells/cm².
+Counts are per image, never summed: the Z-slices of a tile see the same cells.
 
 ## Pause, resume, cancel
 
@@ -427,7 +464,7 @@ sudo systemctl disable --now microscope-monitor
 | `--output-dir` | `MM_ST_OUTPUT_DIR` | `./data/station/masks` |
 | `--db-path` | `MM_ST_DB_PATH` | `./data/station.sqlite` |
 | `--host` / `--port` | `MM_ST_HOST` / `MM_ST_PORT` | `0.0.0.0` / `8100` |
-| `--batch-size` | `MM_ST_BATCH_SIZE` | `16` |
+| `--batch-size` | `MM_ST_BATCH_SIZE` | `2` (images per GPU call) |
 | `--poll-interval` | `MM_ST_POLL_INTERVAL` | `5` |
 | `--stable-seconds` | `MM_ST_STABLE_SECONDS` | `0` = 2x poll |
 | `--telemetry-interval` | `MM_ST_TELEMETRY_INTERVAL` | `2` |
@@ -440,7 +477,13 @@ sudo systemctl disable --now microscope-monitor
 | `--falling-behind-seconds` | `MM_ST_FALLING_BEHIND_SECONDS` | `300` |
 | `--disk-free-threshold-gb` | `MM_ST_DISK_FREE_GB` | `50` |
 | `--plate-rows` / `--plate-cols` | `MM_ST_PLATE_ROWS` / `MM_ST_PLATE_COLS` | `8` / `12` |
+| `--include-existing` | `MM_ST_INCLUDE_EXISTING` | off |
+| `--capture-folder NAME` | — (repeatable) | none |
+| `--active-window` | `MM_ST_ACTIVE_WINDOW` | `900` |
 
+`--batch-size` is images per GPU call: equal-sized images are stacked into one
+`model.eval`. Cellpose's own `batch_size` (256×256 patches per pass, 48) is a
+segmentation setting in `backend/analysis.py` and is not touched by it.
 `--batch-size` is the starting value only; `POST /api/config/batch-size`
 changes it live and the change is not written back to the config.
 

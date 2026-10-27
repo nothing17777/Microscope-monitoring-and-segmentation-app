@@ -16,6 +16,12 @@ LumaViewPro itself is never modified — these apps only read its output.
 - `preflight.py` — fresh-workstation checks (GPU kernels, dinov3, dirs, port, throughput).
   `--study` additionally probes a *running* station's experiment instrumentation and
   restores the phase and batch size it changed; it refuses to run mid-acquisition.
+- `backend/analysis.py` — the segmentation settings, per-image analysis and exports,
+  ported value-for-value from `Etaluma_Live_Segmentation_Optimized (2).py`, the
+  standalone script the lab validated masks with (kept in the repo as the reference).
+- `station/lvp.py` — what LumaViewPro 4 writes: `ProtocolData/<YYYYMMDD_HHMMSS>/`
+  folders, `{well}_{color}_{tile}_Z{n}_{scan}.tiff` names, the saved protocol.
+- `docs/WORKSTATION.md` — the lab workstation: hardware, envs, paths, measured rates.
 - `fake_producer.py` — synthetic acquisition for local testing.
 - `sweep.py` — cycles batch sizes and sets phase labels on a timer against a
   running station, so a capacity sweep runs hands-off.
@@ -42,7 +48,8 @@ python -m station.main --input-dir ./data/station/input --db-path ./data/station
 cd station/frontend && npm run dev            # :5174, proxies to :8100
 
 # tests — there is no pytest; the only test suite is:
-python -m station.selftest                    # alerts, lock, ETAs, phases, batch size, report
+python -m station.selftest                    # alerts, lock, ETAs, phases, batch size, report,
+                                              # analysis vs script, LVP parsing, capture folders
 # single test: edit main() in station/selftest.py, or call e.g.
 python -c "import tempfile,pathlib,station.selftest as s; s.test_eta(pathlib.Path(tempfile.mkdtemp()))"
 
@@ -93,6 +100,20 @@ is not run-specific:
 - `station/` — the only place with endpoints: `POST /api/phase`, `POST /api/config/batch-size`,
   `GET /api/report`, `GET /api/report.md`, the `batches` table, and the Experiment page.
 
+### Segmentation
+
+Both workers call `Worker._segment_rows`, which runs `analysis.segment` and
+`analysis.export`. Two different batch sizes exist and must not be conflated:
+the worker's `batch_size` is **images per GPU call** (stacked as N,Y,X,1 with
+`channel_axis=-1`; a Python list would make Cellpose loop one image at a time),
+and `Settings.cellpose_batch_size` (48) is Cellpose's 256×256 patches per pass.
+Never change a value in `analysis.Settings` without comparing masks/ROIs
+against a baseline run. `selftest.test_analysis` pins the bounding-box ROI
+and size-filter code to the script's whole-frame algorithm.
+
+Outputs mirror the input layout (`<output>/<capture folder>/masks|rois|debug_plots`
+plus `density_per_well.csv`); the station stores `cells`/`density` per image.
+
 ### Invariants that look like bugs if you don't know them
 
 - **Partial-file guard**: a TIFF is queued only when its size is identical on two consecutive
@@ -119,6 +140,10 @@ is not run-specific:
 - **The acquisition lock is one mutex in the backend** (`JobManager.create_acquisition`,
   `RunManager.create`) — two simultaneous browsers get one job and one `409`. Never move it
   to the UI.
+- **One run per LVP capture folder** (`StationWorker._job_for_path`). Folders
+  already in `ProtocolData` at startup are skipped unless still being written
+  (`--active-window`), named (`--capture-folder`) or `--include-existing`;
+  otherwise weeks of old plates would bury the live one.
 - **No filename pattern or image dimension is hardcoded.** The scanner globs `**/*.tif[f]`
   case-insensitively; well labels are inferred from path components (`station/wells.py`) and
   images that say nothing are `unplaced`, never guessed into A01.

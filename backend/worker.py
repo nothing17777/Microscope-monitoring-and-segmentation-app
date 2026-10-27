@@ -4,7 +4,8 @@ One background thread. Each cycle:
   1. scan the input dir recursively for TIFFs and note sizes
   2. enqueue only files whose size was identical on the previous poll
      (LumaViewPro writes incrementally; a growing file is never queued)
-  3. segment pending files in dimension-homogeneous batches
+  3. segment pending files in dimension-homogeneous batches, with the
+     settings and exports in analysis.py (the lab's validated script)
 
 Discovered files are attached to a segmentation job, so the queue panel has
 something real to show and so a job can be paused or cancelled independently
@@ -22,6 +23,7 @@ from typing import Any
 
 import numpy as np
 
+from . import analysis
 from .config import Config
 from .db import Database
 from .device import pick_device
@@ -64,6 +66,7 @@ class Worker:
         self.model: Any = None
         self.model_label = "dry-run" if cfg.dry_run else cfg.model_name
         self.batch_size = cfg.batch_size
+        self.seg = analysis.DEFAULT
         self.oom_events = 0
         self.last_error: str | None = None
         self.input_bytes = 0
@@ -259,7 +262,7 @@ class Worker:
         total_bytes = 0
         if root.exists():
             for p in root.rglob("*"):
-                if not _is_tiff(p):
+                if not _is_tiff(p) or not self._wanted(p):
                     continue
                 try:
                     st = p.stat()
@@ -276,8 +279,7 @@ class Worker:
         self.last_scan_at = now
 
         known = self.db.known_paths()
-        enqueued = 0
-        job_id: int | None = None
+        enqueued: dict[int, int] = defaultdict(int)
         seen: dict[str, tuple[int, float]] = {}
         for path, size in sizes.items():
             prev = self._seen.get(path)
@@ -300,8 +302,7 @@ class Worker:
                 n = self._read_retries.get(path, 0) + 1
                 self._read_retries[path] = n
                 if n >= self.MAX_READ_RETRIES:
-                    if job_id is None:
-                        job_id = self._job_for_new_files()
+                    job_id = self._job_for_path(Path(path))
                     self.db.add_pending(path, size, None, None, job_id=job_id)
                     self.db.mark_failed(path, f"unreadable after {n} attempts: {e!r}")
                     self.db.bump_job(job_id, failed=1, total=1)
@@ -314,17 +315,24 @@ class Worker:
                     log.info("not readable yet (attempt %d), will retry: %s", n, path)
                 continue
             self._read_retries.pop(path, None)
-            if job_id is None:
-                job_id = self._job_for_new_files()
+            job_id = self._job_for_path(Path(path))
             self.db.add_pending(path, size, w, h, job_id=job_id)
             self._record_arrival(mtimes.get(path, now))
-            enqueued += 1
+            enqueued[job_id] += 1
         self._seen = seen
-        if enqueued and job_id is not None:
-            self.db.bump_job(job_id, total=enqueued)
-            log.info("enqueued %d file(s) into segmentation job #%s; %d TIFF(s) on disk",
-                     enqueued, job_id, len(sizes))
-        return enqueued
+        for job_id, n in enqueued.items():
+            self.db.bump_job(job_id, total=n)
+            log.info("enqueued %d file(s) into job #%s; %d TIFF(s) on disk",
+                     n, job_id, len(sizes))
+        return sum(enqueued.values())
+
+    def _wanted(self, path: Path) -> bool:
+        """Whether scan() should look at this file at all. Everything, here."""
+        return True
+
+    def _job_for_path(self, path: Path) -> int:
+        """The job a newly discovered file belongs to. One job for all, here."""
+        return self._job_for_new_files()
 
     # --- segmentation ------------------------------------------------------
 
@@ -359,6 +367,19 @@ class Worker:
             self.db.update_job(job_id, status="running", started_at=time.time())
         self.current_job_id = job_id
 
+        result = self._segment_rows(rows)
+        if result is None:
+            return False  # model failure: back off until the next poll
+        self.db.bump_job(job_id, completed=result[0], failed=result[1])
+        return True
+
+    def _segment_rows(self, rows) -> tuple[int, int] | None:
+        """Segment and export one dimension-homogeneous batch out of `rows`.
+
+        Shared by both apps. Returns (done, failed), or None when the model
+        itself failed: those images stay pending, so a transient GPU error
+        never loses work.
+        """
         groups: dict[tuple[Any, Any], list[str]] = defaultdict(list)
         for r in rows:
             groups[(r["width"], r["height"])].append(r["path"])
@@ -367,6 +388,7 @@ class Worker:
 
         images: list[np.ndarray] = []
         kept: list[str] = []
+        failed = 0
         for path in paths:
             try:
                 arr = _read_image(Path(path))
@@ -374,82 +396,90 @@ class Worker:
                 self.db.set_dims(path, w, h)
                 if (w, h) != key and key != (None, None):
                     continue  # dims changed since discovery; next batch picks it up
+                analysis.to_gray(arr)  # reject shapes the model cannot take, here
                 images.append(arr)
                 kept.append(path)
             except Exception as e:  # noqa: BLE001
                 self.db.mark_failed(path, f"read failed: {e!r}")
                 log.warning("read failed %s: %r", path, e)
+                failed += 1
         if not kept:
-            return True
+            return 0, failed
 
         t0 = time.time()
         masks = self._run_model(images)
         if masks is None:
-            # Model-level failure (OOM that survived halving, or a backend
-            # error). Files stay pending; back off until the next poll so we
-            # don't spin on them.
-            return False
+            return None
 
-        self._record_batch(len(kept), time.time() - t0)
-
-        ok = failed = 0
-        for path, mask in zip(kept, masks):
+        ok = 0
+        for path, image, mask in zip(kept, images, masks):
             try:
-                out = self._mask_path(Path(path))
-                out.parent.mkdir(parents=True, exist_ok=True)
-                np.save(str(out), np.asarray(mask))
+                src = Path(path)
+                res = analysis.analyze(np.asarray(mask), self.seg)
+                out = analysis.export(src, image, res, self._out_dir(src), self.seg)
                 self.db.mark_done(path, str(out))
+                record = getattr(self.db, "set_result", None)
+                if record is not None:
+                    record(path, res.cells, res.density)
                 ok += 1
             except Exception as e:  # noqa: BLE001
-                self.db.mark_failed(path, f"mask write failed: {e!r}")
-                log.exception("mask write failed for %s", path)
+                self.db.mark_failed(path, f"export failed: {e!r}")
+                log.exception("export failed for %s", path)
                 failed += 1
-        self.db.bump_job(job_id, completed=ok, failed=failed)
-        return True
+        # Timed through the exports: that is the rate the backlog drains at.
+        self._record_batch(len(kept), time.time() - t0)
+        return ok, failed
 
-    def _mask_path(self, src: Path) -> Path:
+    def _out_dir(self, src: Path) -> Path:
+        """Mirror the input layout: <output>/<capture folder>/{masks,rois,...}."""
         try:
             rel = src.relative_to(self.cfg.input_dir)
         except ValueError:
             rel = Path(src.name)
-        return (self.cfg.output_dir / rel).with_suffix(".npy")
+        return self.cfg.output_dir / rel.parent
 
     def _run_model(self, images: list[np.ndarray]) -> list[np.ndarray] | None:
-        """Run the model, halving the batch on CUDA OOM. Never raises."""
-        bs = len(images)
-        while bs >= 1:
+        """Masks for `images`, in order. Never raises.
+
+        On CUDA OOM the batch is split in half, and the worker's batch size
+        follows it down. Any other error on a multi-image batch retries one
+        image per call, as the original script did for a Cellpose that
+        rejects stacked input.
+        """
+        grays = [analysis.to_gray(im) for im in images]
+        if self.cfg.dry_run or self.model is None:
+            return [self._dry_mask(g) for g in grays]
+        chunk = len(grays)
+        while True:
             try:
-                if self.cfg.dry_run or self.model is None:
-                    return [self._dry_mask(im) for im in images]
-                out = self.model.eval(images, batch_size=bs)
-                masks = out[0] if isinstance(out, (tuple, list)) else out
-                if isinstance(masks, np.ndarray) and len(images) > 1 and masks.ndim == 3:
-                    masks = list(masks)
-                elif not isinstance(masks, list):
-                    masks = [masks]
-                return masks
+                out: list[np.ndarray] = []
+                for i in range(0, len(grays), chunk):
+                    out.extend(analysis.segment(self.model, grays[i:i + chunk], self.seg))
+                return out
             except Exception as e:  # noqa: BLE001
+                self._empty_cache()
                 if self._is_oom(e):
                     self.oom_events += 1
-                    new_bs = max(1, bs // 2)
-                    self.last_error = f"CUDA OOM at batch {bs}; retrying at {new_bs}"
-                    log.error("CUDA OOM at batch %d, retrying at %d", bs, new_bs)
-                    self._empty_cache()
-                    if new_bs == bs:  # already at 1 and still OOM
-                        self.last_error = f"CUDA OOM at batch size 1: {e!r}"
-                        log.error("OOM at batch size 1; giving up on this batch")
+                    if chunk == 1:
+                        self.last_error = f"CUDA OOM at one image: {e!r}"
+                        log.error("OOM at one image; giving up on this batch")
                         return None
-                    self.batch_size = max(1, min(self.batch_size, new_bs))
-                    bs = new_bs
+                    chunk = max(1, chunk // 2)
+                    self.batch_size = max(1, min(self.batch_size, chunk))
+                    self.last_error = f"CUDA OOM; retrying {chunk} image(s) per call"
+                    log.error("CUDA OOM, retrying %d image(s) per call", chunk)
+                    continue
+                if chunk > 1:
+                    chunk = 1
+                    self.last_error = f"batched eval failed ({e!r}); one image per call"
+                    log.exception("batched eval failed; retrying one image per call")
                     continue
                 self.last_error = repr(e)
-                log.exception("segmentation batch failed")
+                log.exception("segmentation failed")
                 return None
-        return None
 
     @staticmethod
-    def _dry_mask(arr: np.ndarray) -> np.ndarray:
-        im = arr if arr.ndim == 2 else arr.reshape(-1, *arr.shape[-2:])[0]
+    def _dry_mask(im: np.ndarray) -> np.ndarray:
         return (im > np.median(im)).astype(np.int32)
 
     @staticmethod
@@ -471,6 +501,7 @@ class Worker:
             "model": self.model_label,
             "model_loaded": self.model is not None or self.cfg.dry_run,
             "batch_size": self.batch_size,
+            "cellpose_batch_size": self.seg.cellpose_batch_size,
             "oom_events": self.oom_events,
             "last_error": self.last_error,
             "input_bytes": self.input_bytes,
