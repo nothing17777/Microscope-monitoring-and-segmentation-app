@@ -173,8 +173,9 @@ WebSocket reconnect (exponential backoff 1 s → 30 s) and the 15 s stale-data b
 - RTX 5090 is Blackwell (`sm_120`) and needs a CUDA 12.8+ torch build; the default PyPI wheel
   imports fine and dies at the first kernel launch. `preflight.py` checks
   `torch.cuda.get_arch_list()` for exactly this.
-- Device is `cuda` → `mps` → `cpu`, shown in the UI header. The M4 Mac mini measures
-  ~34.7 s/image at 2048×2048 on MPS — far too slow for a real plate; it is a UI dev box.
+- Device resolves `cuda` → `mps` → `cpu` and is shown in the UI header. On
+  `neil-linlab-GamingPC` it is always `cuda`; anything else there means the torch build or
+  the driver is wrong, not a fallback worth running a plate on.
 
 Full config tables, API tables, systemd deployment and the Tailscale guidance are in
 `README.md` and `station/README.md`; keep them in sync when changing flags or endpoints.

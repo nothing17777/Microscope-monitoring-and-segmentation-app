@@ -48,16 +48,7 @@ No filename pattern or image dimension is hardcoded anywhere: the scanner globs
 
 ## Install
 
-### macOS dev box (M4 Mac mini)
-
 Cellpose and torch want a Python that has wheels; use 3.11 or 3.12.
-
-```bash
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt     # torch here is the MPS build
-pip install git+https://github.com/facebookresearch/dinov3   # required by cpdino
-cd frontend && npm install && npm run build && cd ..
-```
 
 If you just want to see the dashboard without a working cellpose install, run
 the backend with `--dry-run` (see below) — it writes a trivial threshold mask
@@ -304,11 +295,12 @@ they take to clear, and how far the plan would have to shrink to hold backlog
 flat. Falling behind is a `WARN`, not a `FAIL` — a growing backlog is a valid
 thing to demonstrate, it just shouldn't be a surprise.
 
-For reference, the M4 Mac mini measures **34.7 s/image at 2048x2048 on MPS**,
-i.e. 74x too slow for the plan above. Run this on the Ubuntu workstation to get
-the number that actually matters.
+For reference, `neil-linlab-GamingPC` measures **0.86 s/image end to end at
+1900x1900** (0.68 s of that GPU inference) with two images per GPU call, against
+acquisition at about 1.65 images/s — so it runs roughly 2x behind during a
+plate and drains afterwards. See `docs/WORKSTATION.md` for the full set.
 
-## Local test (Mac mini)
+## Local test
 
 Three terminals.
 
@@ -423,6 +415,7 @@ holds the input directory (`findmnt -T`, plus `lsblk` for that device). It is
 stored in SQLite, served at `/api/specs`, written to `specs.txt`, and the
 dashboard shows it in a panel with a **Copy** button.
 
-On macOS the Linux-only commands report themselves unavailable and
+Off Linux the Linux-only commands report themselves unavailable and
 `sysctl machdep.cpu.brand_string` / `system_profiler SPHardwareDataType` are
-captured instead, so a dev-box dump is still useful.
+captured instead, so the dump still says which machine produced it. Only a dump
+from `neil-linlab-GamingPC` describes the lab.
