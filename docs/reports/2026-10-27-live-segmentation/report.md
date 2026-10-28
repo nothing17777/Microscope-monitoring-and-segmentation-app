@@ -53,7 +53,7 @@ acquisition and both segmenters were still running.
 | Station segmentation | 718 | 15,360 | 0.80 img/s | ≈22:00 if the script keeps running |
 | Standalone script | 1,929 | 15,360 | 0.72 img/s | ≈22:00 if the station keeps running |
 
-![Station dashboard at 16:46: acquisition and segmentation headlines and the plate map](docs/report1/overview.png)
+![Station dashboard at 16:46: acquisition and segmentation headlines and the plate map](overview.png)
 *Figure 1. Station Dashboard at 16:46. On the plate map, amber wells are
 being segmented, blue wells are acquired and waiting, and plain grey wells are not
 yet imaged.*
@@ -81,11 +81,11 @@ alongside the Dashboard's "What normal looks like" reading at 16:44.
 | Time between images | ≈0.6 s | 0.60 s | 0.60 s | 0.98 s | 3.2 s (well move) | normal |
 | Segmentation speed (station) | ≈0.9 img/s while shared | 0.81 img/s | 0.80 | 0.93 | 1.00 | normal |
 
-![Dashboard "What normal looks like" card at 16:46, all rows normal](docs/report1/normal.png)
+![Dashboard "What normal looks like" card at 16:46, all rows normal](normal.png)
 *Figure 2. The Dashboard's "What normal looks like" card at 16:46. All nine
 measures read normal.*
 
-![Dashboard charts: backlog, throughput, host load, GPU temperature, power, memory, acquisition impact, disk](docs/report1/charts.png)
+![Dashboard charts: backlog, throughput, host load, GPU temperature, power, memory, acquisition impact, disk](charts.png)
 *Figure 3. The last 17 minutes of station telemetry (16:29–16:46). Backlog
 rises steadily because acquisition outpaces segmentation. Throughput holds
 near 0.8 img/s. GPU load, temperature (≈67 °C) and power (400–600 W) stay
